@@ -134,38 +134,66 @@ def download_file(url: str, dest_dir: Path, overwrite: bool = False) -> Path:
 # --------------------------------------------------------------------------- #
 # Station metadata
 # --------------------------------------------------------------------------- #
+COUNTRY_NAMES = {"BE": "belgium", "NL": "netherlands", "LU": "luxembourg", "FR": "france",
+                 "DE": "germany"}
+
+
+def _read_csv_bytes(content: bytes) -> pd.DataFrame:
+    """Read a CSV whose delimiter/encoding we don't know in advance."""
+    head = content[:4096]
+    if head.lstrip().lower().startswith((b"<!doctype", b"<html")):
+        raise RuntimeError("The metadata URL returned an HTML page instead of a CSV.")
+    text_head = head.decode("utf-8-sig", errors="replace").splitlines()[0]
+    sep = max([",", ";", "\t"], key=text_head.count)
+    return pd.read_csv(io.BytesIO(content), sep=sep, encoding="utf-8-sig", low_memory=False)
+
+
+def filter_metadata(meta: pd.DataFrame, countries: list[str]) -> pd.DataFrame:
+    """Keep rows of our countries, whatever the column layout of this release is."""
+    codes = {c.upper() for c in countries}
+    names = {COUNTRY_NAMES.get(c, c).lower() for c in codes}
+    mask = pd.Series(False, index=meta.index)
+    for col in meta.columns:
+        if pd.api.types.is_numeric_dtype(meta[col]):
+            continue
+        s = meta[col].astype(str).str.strip()
+        low = col.lower()
+        if "country" in low or low in ("iso", "countrycode"):
+            mask |= s.str.upper().isin(codes) | s.str.lower().isin(names)
+        if "sampling" in low or "station" in low:
+            # ids like 'BE/SPO-BELAL01_06001_100' or 'SPO-BELAL01_...' or 'BELAL01'
+            pat = "|".join(rf"^{c}/|^SPO-{c}|^{c}[A-Z0-9]" for c in codes)
+            mask |= s.str.upper().str.contains(pat, regex=True)
+    return meta[mask]
+
+
 def download_metadata(out_csv: Path, countries: list[str], overwrite: bool = False) -> Path:
-    """Download the Europe-wide station metadata and keep only our countries."""
-    if out_csv.exists() and not overwrite:
+    """Download the Europe-wide station metadata, keep a raw copy, and save our countries."""
+    raw_csv = out_csv.with_name("stations_metadata_europe.csv")
+    if out_csv.exists() and out_csv.stat().st_size > 1000 and not overwrite:
         print(f"Metadata already present: {out_csv}")
         return out_csv
-    print("Downloading station metadata (all of Europe, can take a minute)...")
-    r = _request("GET", METADATA_URL, timeout=600)
-    content = r.content
-    if zipfile.is_zipfile(io.BytesIO(content)):
-        with zipfile.ZipFile(io.BytesIO(content)) as zf:
-            csv_name = next(n for n in zf.namelist() if n.lower().endswith(".csv"))
-            content = zf.read(csv_name)
-    meta = pd.read_csv(io.BytesIO(content), low_memory=False)
-
-    # The country column name has varied between releases; find it defensively.
-    country_col = next((c for c in meta.columns if c.strip().lower() in
-                        ("country", "countrycode", "country code", "iso")), None)
-    if country_col is not None:
-        codes = {c.upper() for c in countries}
-        mask = meta[country_col].astype(str).str.upper().isin(codes)
-        # Some releases use full names ("Belgium") instead of ISO codes
-        if mask.sum() == 0:
-            sp_col = next((c for c in meta.columns if "sampling point" in c.lower()), None)
-            if sp_col is not None:
-                mask = meta[sp_col].astype(str).str[:2].str.upper().isin(codes)
-        meta = meta[mask]
+    if raw_csv.exists() and not overwrite:
+        meta = pd.read_csv(raw_csv, low_memory=False)
     else:
-        print("  ! Could not find a country column, keeping the full metadata file.")
+        print("Downloading station metadata (all of Europe, can take a minute)...")
+        content = _request("GET", METADATA_URL, timeout=600).content
+        if zipfile.is_zipfile(io.BytesIO(content)):
+            with zipfile.ZipFile(io.BytesIO(content)) as zf:
+                csv_name = next(n for n in zf.namelist() if n.lower().endswith(".csv"))
+                content = zf.read(csv_name)
+        meta = _read_csv_bytes(content)
+        raw_csv.parent.mkdir(parents=True, exist_ok=True)
+        meta.to_csv(raw_csv, index=False)
+    print(f"Europe-wide metadata: {len(meta):,} rows. Columns: {list(meta.columns)}")
 
-    out_csv.parent.mkdir(parents=True, exist_ok=True)
-    meta.to_csv(out_csv, index=False)
-    print(f"Saved {len(meta):,} metadata rows -> {out_csv}")
+    ours = filter_metadata(meta, countries)
+    if ours.empty:
+        print("  ! Could not identify our countries' rows; saving the full European file instead. "
+              "preprocess.py will still match stations by sampling point id.")
+        ours = meta
+    ours.to_csv(out_csv, index=False)
+    print(f"Saved {len(ours):,} metadata rows -> {out_csv}")
     return out_csv
 
 
@@ -220,7 +248,14 @@ def main() -> None:
     p.add_argument("--summary-only", action="store_true", help="only print download size")
     p.add_argument("--no-metadata", action="store_true", help="skip station metadata")
     p.add_argument("--overwrite", action="store_true", help="re-download existing files")
+    p.add_argument("--metadata-only", action="store_true",
+                   help="only (re)download the station metadata, not the measurements")
     args = p.parse_args()
+
+    if args.metadata_only:
+        download_metadata(args.out / "stations_metadata.csv",
+                          [c.upper() for c in args.countries], overwrite=True)
+        return
 
     countries = [c.upper() for c in args.countries]
     print(f"Countries: {countries} | Pollutants: {args.pollutants} | Datasets: {args.datasets}")

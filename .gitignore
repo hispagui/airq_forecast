@@ -1,5 +1,30 @@
+# Data, reproducible with scripts
+data/raw/
+data/processed/
+*.parquet
+*.npz
+*.nc
+*.grib
+
+# Model checkpoints and experiment logs
+checkpoints/
+runs/
+wandb/
+*.pt
+*.pth
+
+# Runs, trained data and weights?
+train.log
+runs/lstm_mse_20261008_231542
+runs/lstm_mse_20261009_003427
+runs/mlp_mse_20261009_103428
+
+
 # Byte-compiled / optimized / DLL files
+architectures/__pycache__/
 __pycache__/
+*.pyc
+.ipynb_checkpoints/
 *.py[codz]
 *$py.class
 
@@ -188,7 +213,8 @@ cython_debug/
 #   be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
 #   and can be added to the global gitignore or merged into this file.  For a more nuclear
 #   option (not recommended) you can uncomment the following to ignore the entire idea folder.
-# .idea/
+.idea/
+.DS_Store
 
 # Abstra
 #   Abstra is an AI-powered process automation framework.
@@ -201,7 +227,7 @@ cython_debug/
 #   can be found at https://github.com/github/gitignore/blob/main/Global/VisualStudioCode.gitignore
 #   and can be added to the global gitignore or merged into this file. However, if you prefer, you
 #   could uncomment the following to ignore the entire vscode folder
-# .vscode/
+.vscode/
 # Temporary file for partial code execution
 tempCodeRunnerFile.py
 
