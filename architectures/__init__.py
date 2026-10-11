@@ -4,7 +4,8 @@ Model registry. Every model follows the same contract:
     model = build_model("lstm", info, out_size=1, **hyperparameters)
     pred  = model(x, x_future)
         x        : (B, L, N, F_in)   history
-        x_future : (B, H, F_time)    calendar features of the hours to predict
+        x_future : (B, H, N, F_fut)  known-in-advance features of the hours to predict
+                                     (weather at each station + calendar)
         pred     : (B, H, N) if out_size == 1, else (B, H, N, out_size)
 
 To add a model (e.g. a GNN in phase 2): write it in a new file, decorate the class with
@@ -30,7 +31,10 @@ def build_model(name: str, info: dict, out_size: int = 1, **kwargs) -> nn.Module
         raise KeyError(f"Unknown model '{name}'. Available: {sorted(MODELS)}")
     return MODELS[name](
         n_nodes=info["n_nodes"], n_features=info["n_features"],
-        n_time_features=info["n_time_features"], history=info["history"],
+        # n_time_features = number of known-future features per hour (calendar + weather);
+        # the name is kept so that the Phase-1 model files need no change.
+        n_time_features=info.get("n_future_features", info["n_time_features"]),
+        history=info["history"],
         horizon=info["horizon"], out_size=out_size, **kwargs,
     )
 

@@ -11,6 +11,7 @@ Detailed evaluation of trained models: where, when and how well they forecast PM
     python evaluate.py --plots                           # + figures
     python evaluate.py --metrics rmse mae bias exceed_f1 # choose metrics (any name in metrics.py)
     python evaluate.py --breakdowns horizon month level  # choose breakdowns (see BREAKDOWNS)
+    python evaluate.py --breakdowns wind_sector rain     # by weather (needs weather.npz)
 
 It compares every model against reference forecasts (last value, persistence,
 climatology) on EXACTLY the same hours and stations, then breaks the errors down by
@@ -49,12 +50,15 @@ import numpy as np
 import pandas as pd
 import torch
 
-import features.metrics as M  # the metric registry lives there
-from features.metrics import METRICS, register_metric  # noqa: F401  (register_metric used by additions)
+import metrics as M  # the metric registry lives there
+from dataset import window_inputs
+from metrics import METRICS, register_metric  # noqa: F401  (register_metric used by additions)
 
 LOCAL_TZ = "Europe/Brussels"
 DEFAULT_METRICS = ["rmse", "mae", "bias", "corr", "skill_rmse"]
-DEFAULT_BREAKDOWNS = ["horizon", "month", "season", "hour", "weekday", "level", "station"]
+DEFAULT_BREAKDOWNS = ["horizon", "month", "season", "hour", "weekday", "level", "station",
+                      "wind_sector", "rain"]
+WEATHER_BREAKDOWNS = {"wind_sector", "rain"}   # skipped when no weather data is available
 DEFAULT_THRESHOLDS = [15.0, 25.0, 50.0]
 ALERT_METRICS = ["exceed_precision", "exceed_recall", "exceed_f1", "exceed_csi"]
 
@@ -131,15 +135,10 @@ def select_t0s(data, start: int, end: int, L: int, H: int,
 def run_model(fc, t0s: np.ndarray, batch_size: int = 256) -> np.ndarray:
     """Model forecasts (S, H, N) in ug/m3 for the given start indices."""
     d, L, H = fc.data, fc.L, fc.H
-    node = torch.stack([d.values, d.mask.float()], dim=-1)          # (T, N, 2)
     out = []
     for i in range(0, len(t0s), batch_size):
-        idx = torch.as_tensor(t0s[i:i + batch_size])
-        hist = idx[:, None] - L + torch.arange(L)                    # (B, L)
-        fut = idx[:, None] + torch.arange(H)                         # (B, H)
-        tf = d.time_features[hist].unsqueeze(2).expand(-1, -1, d.n_nodes, -1)
-        x = torch.cat([node[hist], tf], dim=-1)
-        pred = fc.model(x, d.time_features[fut])
+        x, x_future = window_inputs(d, t0s[i:i + batch_size], L, H, fc.use_weather)
+        pred = fc.model(x, x_future)
         out.append(fc.norm.denormalize(M.point_forecast(pred, fc.cfg["loss"])).numpy())
     return np.concatenate(out).astype(np.float32)
 
@@ -243,6 +242,39 @@ def bd_hour(ctx):
 @register_breakdown("weekday")
 def bd_weekday(ctx):
     return ctx["target_local"].dayofweek.values.reshape(ctx["target_idx"].shape)[..., None], WEEKDAYS
+
+
+WIND_SECTORS = ["from N", "from NE", "from E", "from SE", "from S", "from SW", "from W",
+                "from NW", "calm (<1 m/s)"]
+
+
+def _weather_at_targets(ctx) -> np.ndarray:
+    """(S, H, N, 3): wind_u, wind_v (m/s) and precipitation (mm) at each target hour."""
+    if ctx.get("weather_raw") is None:
+        raise SystemExit("This breakdown needs weather data: run prepare_weather.py.")
+    return ctx["weather_raw"][ctx["target_idx"]]
+
+
+@register_breakdown("wind_sector")
+def bd_wind_sector(ctx):
+    """By the direction the wind blows FROM at the station and target hour (8 sectors + calm).
+    Shows whether errors depend on the air mass: e.g. easterly (continental) episodes."""
+    w = _weather_at_targets(ctx)
+    u, v = w[..., 0], w[..., 1]
+    speed = np.hypot(u, v)
+    dir_from = (np.degrees(np.arctan2(-u, -v)) + 360) % 360
+    lab = (((dir_from + 22.5) // 45) % 8).astype(np.int64)
+    lab = np.where(speed < 1.0, 8, lab)
+    return np.where(np.isfinite(speed), lab, -1), WIND_SECTORS
+
+
+@register_breakdown("rain")
+def bd_rain(ctx):
+    """By precipitation at the target hour: rain washes particles out of the air."""
+    p = _weather_at_targets(ctx)[..., 2]
+    lab = np.digitize(np.nan_to_num(p, nan=-1), [0.1, 1.0])
+    return np.where(np.isfinite(p), lab, -1), ["dry (<0.1 mm/h)", "light (0.1-1 mm/h)",
+                                               "rain (>=1 mm/h)"]
 
 
 @register_breakdown("level")
@@ -441,7 +473,7 @@ def main():
     p.add_argument("--to", dest="date_to", default=None, help="end date (Brussels), exclusive")
     p.add_argument("--metrics", nargs="+", default=DEFAULT_METRICS,
                    help=f"scalar metrics from metrics.py. Available: {sorted(METRICS)}")
-    p.add_argument("--breakdowns", nargs="+", default=DEFAULT_BREAKDOWNS,
+    p.add_argument("--breakdowns", nargs="+", default=None,
                    help=f"Available: {sorted(BREAKDOWNS)}")
     p.add_argument("--references", nargs="*", default=list(REFERENCES),
                    help=f"Available: {sorted(REFERENCES)}")
@@ -452,12 +484,14 @@ def main():
     p.add_argument("--out", type=Path, default=None)
     args = p.parse_args()
 
+    explicit = args.breakdowns is not None
+    args.breakdowns = args.breakdowns or DEFAULT_BREAKDOWNS
     unknown = [m for m in args.metrics if m not in METRICS] + \
               [b for b in args.breakdowns if b not in BREAKDOWNS]
     if unknown:
         raise SystemExit(f"Unknown metric/breakdown: {unknown}")
 
-    from features.predict import Forecaster  # loads checkpoint + processed data + normalizer
+    from predict import Forecaster  # loads checkpoint + processed data + normalizer
     run_dirs = [Path(r) for r in args.runs] or [latest_run()]
     fcs = [Forecaster(r) for r in run_dirs]
     ref_fc = fcs[0]
@@ -466,6 +500,12 @@ def main():
             raise SystemExit("Runs differ in stations, history or horizon; they can't be compared "
                              "on the same windows.")
     data, L, H = ref_fc.data, ref_fc.L, ref_fc.H
+    if data.weather_raw is None:
+        skipped = [b for b in args.breakdowns if b in WEATHER_BREAKDOWNS]
+        if skipped and explicit:
+            raise SystemExit(f"{skipped} need weather data: run download_weather.py and "
+                             "prepare_weather.py first.")
+        args.breakdowns = [b for b in args.breakdowns if b not in WEATHER_BREAKDOWNS]
     times = timeline(data)
     period, a, z = resolve_period(args, data, times)
     t0s = select_t0s(data, a, z, L, H)
@@ -496,7 +536,8 @@ def main():
     ctx = {"raw": raw, "mask": mask, "t0s": t0s, "L": L, "H": H, "times": times,
            "stations": data.stations, "target_idx": target_idx,
            "target_local": times[target_idx.ravel()].tz_convert(LOCAL_TZ),
-           "train_range": tuple(data.meta["splits"]["train"])}
+           "train_range": tuple(data.meta["splits"]["train"]),
+           "weather_raw": data.weather_raw}
 
     for rname in args.references:
         forecasts[rname] = REFERENCES[rname](ctx).astype(np.float32)

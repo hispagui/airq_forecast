@@ -17,6 +17,14 @@ Output
         one row per forecast hour (Brussels time), one column per station, values in ug/m3
     with --plot: forecast_<date>.png (history, forecast and observations)
 
+Weather
+-------
+Models trained with weather need the weather of the 24 forecast hours:
+  * forecast inside the data (a past date): the stored reanalysis weather is used;
+  * forecast beyond the end of the data: the weather FORECAST is fetched from the
+    Open-Meteo Forecast API (internet needed), engineered and normalized exactly like the
+    training features.
+
 From Python
 -----------
     from predict import Forecaster
@@ -34,8 +42,8 @@ import pandas as pd
 import torch
 
 from architectures import build_model
-from features.dataset import Normalizer, load_processed
-from features.metrics import point_forecast
+from dataset import Normalizer, load_processed, window_inputs
+from metrics import output_size, point_forecast
 
 LOCAL_TZ = "Europe/Brussels"
 
@@ -72,9 +80,20 @@ class Forecaster:
                                "Re-run preprocess.py with the same settings, or retrain.")
         self.norm = Normalizer(self.data.norm_mean, self.data.norm_std)
         self.L, self.H = cfg["history"], cfg["horizon"]
+        # Older (Phase-1) runs have no weather keys: they used PM2.5 + calendar only
+        self.use_weather = cfg.get("use_weather", False)
+        if self.use_weather:
+            if self.data.weather is None:
+                raise RuntimeError("This model was trained with weather, but weather.npz is "
+                                   "missing or outdated. Run prepare_weather.py.")
+            if self.data.weather_features != cfg["weather_features"]:
+                raise RuntimeError(f"Weather features differ from training: "
+                                   f"{self.data.weather_features} vs {cfg['weather_features']}. "
+                                   "Re-run prepare_weather.py with the same variables, or retrain.")
         info = {"n_nodes": self.data.n_nodes, "n_features": cfg["n_features"],
-                "n_time_features": cfg["n_time_features"], "history": self.L, "horizon": self.H}
-        from features.metrics import output_size
+                "n_time_features": cfg["n_time_features"],
+                "n_future_features": cfg.get("n_future_features", cfg["n_time_features"]),
+                "history": self.L, "horizon": self.H}
         self.model = build_model(cfg["model"], info, out_size=output_size(cfg["loss"]),
                                  hidden=cfg["hidden"], layers=cfg["layers"],
                                  dropout=cfg["dropout"], residual=not cfg["no_residual"])
@@ -101,19 +120,42 @@ class Forecaster:
                              "the model needs the 72 h before the forecast. Update the data first.")
         return t0
 
+    def forecast_weather(self, future_times: pd.DatetimeIndex) -> torch.Tensor:
+        """Weather forecast for the given hours at every station, normalized: (H, N, F_w)."""
+        from download_weather import fetch_forecast
+        from prepare_weather import RAW_FOR_FEATURE, engineer_features, normalize
+        wm = self.data.weather_meta
+        coords = pd.DataFrame(wm["station_coords"])
+        needed = sorted({r for f in wm["features"] for r in RAW_FOR_FEATURE[f]})
+        print(f"Fetching the weather forecast for {len(coords)} stations (Open-Meteo)...")
+        df = fetch_forecast(coords["lat"], coords["lon"], future_times, needed)
+        raw = {v: df.pivot(index="time", columns="point", values=v)
+                    .reindex(index=future_times, columns=range(len(coords))).to_numpy()
+               for v in needed}
+        names, feats, _ = engineer_features(raw, only=wm["features"])
+        miss = np.isnan(feats).mean(axis=(0, 1))
+        for n, m in zip(names, miss):
+            if m > 0:
+                print(f"  ! {n}: {m:.0%} missing in the forecast, replaced by the training average")
+        return torch.from_numpy(normalize(feats, names, wm["normalization"]))
+
     @torch.no_grad()
     def forecast(self, date: str | None = None) -> pd.DataFrame:
         t0 = self._t0_index(date)
         d = self.data
-        hist = slice(t0 - self.L, t0)
-        x = torch.cat([d.values[hist].unsqueeze(-1), d.mask[hist].float().unsqueeze(-1),
-                       d.time_features[hist].unsqueeze(1).expand(-1, d.n_nodes, -1)], dim=-1)
-
         start = self.times[0] + pd.Timedelta(hours=t0)
         future_times = pd.date_range(start, periods=self.H, freq="h", tz="UTC")
-        x_future = torch.from_numpy(time_features(future_times))
 
-        pred = self.model(x.unsqueeze(0), x_future.unsqueeze(0))
+        if t0 + self.H <= len(self.times):      # every forecast hour is in the data
+            x, x_future = window_inputs(d, [t0], self.L, self.H, self.use_weather)
+        else:                                   # beyond the data: calendar + weather forecast
+            ft = torch.from_numpy(time_features(future_times)).unsqueeze(0)
+            fw = (self.forecast_weather(future_times).unsqueeze(0)
+                  if self.use_weather else None)
+            x, x_future = window_inputs(d, [t0], self.L, self.H, self.use_weather,
+                                        future_time=ft, future_weather=fw)
+
+        pred = self.model(x, x_future)
         ugm3 = self.norm.denormalize(point_forecast(pred, self.cfg["loss"]))[0].numpy()  # (H, N)
 
         table = pd.DataFrame(ugm3, columns=d.stations,

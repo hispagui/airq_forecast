@@ -10,18 +10,22 @@ One sample = one forecast issued at time t0:
     ------------------------------------>|------------------------->
     past PM2.5 at all stations           |  PM2.5 to predict at all stations
     + "was it observed?" flag            |  + mask (which targets are real)
+    + weather at each station            |  + weather of the hours to predict
     + calendar features                  |  + calendar features (known in advance)
 
 Every model in the project (MLP, LSTM, GNN, hybrid quantum) gets the SAME batch:
 
-    x            (B, L, N, F_in)  inputs per hour and station
-    x_future     (B, H, F_time)   calendar features of the hours to predict
-    y            (B, H, N)        normalized targets (log1p + z-score)
-    y_mask       (B, H, N)        True where the target was observed (use it in the loss!)
-    t0           (B,)             index of the first predicted hour (for plotting / debugging)
+    x            (B, L, N, F_in)   inputs per hour and station
+    x_future     (B, H, N, F_fut)  what is known in advance about the hours to predict
+    y            (B, H, N)         normalized targets (log1p + z-score)
+    y_mask       (B, H, N)         True where the target was observed (use it in the loss!)
+    t0           (B,)              index of the first predicted hour (for plotting / debugging)
 
 with B = batch, L = history length, H = horizon, N = number of stations.
-Input features F_in = [pm25_normalized, observed_flag, 7 calendar features] = 9.
+    F_in  = [pm25_normalized, observed_flag, *weather (F_w), *calendar (7)]  = 9 + F_w
+    F_fut = [*weather (F_w), *calendar (7)]                                 = 7 + F_w
+The weather (F_w features) comes from prepare_weather.py (weather.npz). Without it, or
+with use_weather=False, F_w = 0 and the inputs are exactly the Phase-1 ones.
 
 Leakage rules
 -------------
@@ -64,6 +68,13 @@ class ProcessedData:
     meta: dict
     norm_mean: np.ndarray        # (N,) mean of log1p(PM2.5) used for the z-score
     norm_std: np.ndarray         # (N,)
+    weather: torch.Tensor | None = None       # (T, N, F_w) normalized weather features
+    weather_raw: np.ndarray | None = None     # (T, N, 3) wind_u, wind_v (m/s), precip (mm)
+    weather_meta: dict | None = None          # feature names, normalization, sources
+
+    @property
+    def weather_features(self) -> list[str]:
+        return self.weather_meta["features"] if self.weather_meta else []
 
     @property
     def n_nodes(self) -> int:
@@ -90,7 +101,23 @@ def find_processed_dir(processed_dir: str | Path = "data/processed") -> Path:
         "Run preprocess.py first, or pass the full path.")
 
 
-def load_processed(processed_dir: str | Path) -> ProcessedData:
+def load_weather(processed_dir: Path, stations: list[str], timestamps: np.ndarray):
+    """weather.npz + weather_meta.json from prepare_weather.py, if present and up to date."""
+    f, m = processed_dir / "weather.npz", processed_dir / "weather_meta.json"
+    if not (f.exists() and m.exists()):
+        return None, None, None
+    wmeta = json.loads(m.read_text())
+    if (wmeta["stations"] != stations or wmeta["n_times"] != len(timestamps)
+            or wmeta["first_timestamp"] != int(timestamps[0])
+            or wmeta["last_timestamp"] != int(timestamps[-1])):
+        print("! weather.npz does not match the PM2.5 data (preprocess.py was re-run?). "
+              "Ignoring it. Run: python prepare_weather.py")
+        return None, None, None
+    arrays = np.load(f)
+    return torch.from_numpy(arrays["features"].astype(np.float32)), arrays["raw"], wmeta
+
+
+def load_processed(processed_dir: str | Path, with_weather: bool = True) -> ProcessedData:
     processed_dir = find_processed_dir(processed_dir)
     print(f"Loading processed data from {processed_dir}")
     arrays = np.load(processed_dir / "dataset.npz")
@@ -106,7 +133,12 @@ def load_processed(processed_dir: str | Path) -> ProcessedData:
         mean = np.array([norm["mean"][s] for s in stations], dtype=np.float32)
         std = np.array([norm["std"][s] for s in stations], dtype=np.float32)
 
+    weather, weather_raw, wmeta = (load_weather(processed_dir, stations, arrays["timestamps"])
+                                   if with_weather else (None, None, None))
+    if wmeta:
+        print(f"Weather features: {wmeta['features']}")
     return ProcessedData(
+        weather=weather, weather_raw=weather_raw, weather_meta=wmeta,
         values=torch.from_numpy(arrays["values"].astype(np.float32)),
         mask=torch.from_numpy(arrays["mask"].astype(bool)),
         raw=arrays["raw"],
@@ -146,6 +178,45 @@ class Normalizer:
 
 
 # --------------------------------------------------------------------------- #
+# Model inputs: ONE function used by training, evaluation and prediction
+# --------------------------------------------------------------------------- #
+def feature_names(data: ProcessedData, use_weather: bool) -> tuple[list[str], list[str]]:
+    """Names of the input features (x) and of the known-future features (x_future)."""
+    w = data.weather_features if use_weather else []
+    cal = [f"calendar_{i}" for i in range(data.time_features.shape[1])]
+    return ["pm25", "observed"] + w + cal, w + cal
+
+
+def window_inputs(data: ProcessedData, t0s, history: int, horizon: int, use_weather: bool,
+                  future_time: torch.Tensor | None = None,
+                  future_weather: torch.Tensor | None = None):
+    """Build (x, x_future) for forecasts starting at the time indices t0s.
+
+        x        (B, L, N, 2 + F_w + F_time)   [pm25, observed, weather..., calendar...]
+        x_future (B, H, N, F_w + F_time)       [weather..., calendar...]
+
+    future_time (B, H, F_time) / future_weather (B, H, N, F_w) replace the stored arrays for
+    hours beyond the end of the data (genuine forecasts in predict.py)."""
+    t0s = torch.as_tensor(t0s, dtype=torch.long).reshape(-1)
+    hist = t0s[:, None] - history + torch.arange(history)            # (B, L)
+    N = data.n_nodes
+
+    parts = [data.values[hist].unsqueeze(-1), data.mask[hist].float().unsqueeze(-1)]
+    if use_weather:
+        parts.append(data.weather[hist])
+    parts.append(data.time_features[hist].unsqueeze(2).expand(-1, -1, N, -1))
+    x = torch.cat(parts, dim=-1)
+
+    fut = t0s[:, None] + torch.arange(horizon)                       # (B, H)
+    ft = future_time if future_time is not None else data.time_features[fut]
+    fparts = []
+    if use_weather:
+        fparts.append(future_weather if future_weather is not None else data.weather[fut])
+    fparts.append(ft.unsqueeze(2).expand(-1, -1, N, -1))
+    return x, torch.cat(fparts, dim=-1)
+
+
+# --------------------------------------------------------------------------- #
 # The Dataset
 # --------------------------------------------------------------------------- #
 class AirQualityWindows(Dataset):
@@ -160,15 +231,14 @@ class AirQualityWindows(Dataset):
         stride: int = 1,
         min_history_valid: float = 0.5,
         min_target_valid: float = 0.5,
+        use_weather: bool = True,
     ):
         assert split in data.meta["splits"], f"unknown split {split}"
         self.data = data
         self.split = split
         self.history = history
         self.horizon = horizon
-
-        # Inputs per time step and station: value, observed flag (+ calendar features broadcast)
-        self.node_inputs = torch.stack([data.values, data.mask.float()], dim=-1)  # (T, N, 2)
+        self.use_weather = use_weather and data.weather is not None
 
         split_start, split_end = data.meta["splits"][split]
         # t0 = first target hour. Targets [t0, t0+H) must be inside the split,
@@ -193,17 +263,12 @@ class AirQualityWindows(Dataset):
 
     def __getitem__(self, i: int) -> dict[str, torch.Tensor]:
         t0 = int(self.t0s[i])
-        L, H = self.history, self.horizon
-        hist = slice(t0 - L, t0)
-        fut = slice(t0, t0 + H)
-
-        node_part = self.node_inputs[hist]                                   # (L, N, 2)
-        time_part = self.data.time_features[hist]                            # (L, F_time)
-        time_part = time_part.unsqueeze(1).expand(-1, self.data.n_nodes, -1)  # (L, N, F_time)
-
+        fut = slice(t0, t0 + self.horizon)
+        x, x_future = window_inputs(self.data, [t0], self.history, self.horizon,
+                                    self.use_weather)
         return {
-            "x": torch.cat([node_part, time_part], dim=-1),   # (L, N, F_in)
-            "x_future": self.data.time_features[fut],        # (H, F_time)
+            "x": x[0],                                       # (L, N, F_in)
+            "x_future": x_future[0],                         # (H, N, F_fut)
             "y": self.data.values[fut],                      # (H, N)
             "y_mask": self.data.mask[fut],                   # (H, N)
             "t0": torch.tensor(t0),
@@ -228,14 +293,20 @@ def make_dataloaders(
     num_workers: int = 0,
     min_history_valid: float = 0.5,
     min_target_valid: float = 0.5,
+    use_weather: bool = True,
 ) -> tuple[dict[str, DataLoader], dict]:
     data = load_processed(processed_dir)
+    if use_weather and data.weather is None:
+        print("No weather features found (run download_weather.py + prepare_weather.py): "
+              "training on PM2.5 + calendar only.")
+    use_weather = use_weather and data.weather is not None
     loaders, sizes = {}, {}
     for split in ("train", "val", "test"):
         ds = AirQualityWindows(
             data, split, history, horizon,
             stride=train_stride if split == "train" else eval_stride,
             min_history_valid=min_history_valid, min_target_valid=min_target_valid,
+            use_weather=use_weather,
         )
         sizes[split] = len(ds)
         loaders[split] = DataLoader(
@@ -244,10 +315,16 @@ def make_dataloaders(
         )
 
     sample = loaders["train"].dataset[0]
+    in_names, fut_names = feature_names(data, use_weather)
     info = {
         "n_nodes": data.n_nodes,
         "n_features": sample["x"].shape[-1],
-        "n_time_features": sample["x_future"].shape[-1],
+        "n_time_features": data.time_features.shape[1],
+        "n_future_features": sample["x_future"].shape[-1],
+        "use_weather": use_weather,
+        "weather_features": data.weather_features if use_weather else [],
+        "feature_names": in_names,
+        "future_feature_names": fut_names,
         "history": history,
         "horizon": horizon,
         "stations": data.stations,
@@ -274,6 +351,8 @@ if __name__ == "__main__":
     data = info["data"]
     print(f"Stations: {info['n_nodes']} | input features: {info['n_features']} "
           f"| history {args.history} h -> horizon {args.horizon} h")
+    print(f"  x        features: {info['feature_names']}")
+    print(f"  x_future features: {info['future_feature_names']}")
     for split, loader in loaders.items():
         ds = loader.dataset
         print(f"  {split:>5}: {len(ds):>7,} samples ({ds.n_dropped:,} dropped for missing data), "

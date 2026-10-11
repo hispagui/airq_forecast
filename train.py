@@ -7,6 +7,10 @@ Train a forecaster on 2016-2023, select it on 2024, report it once on 2025.
     python train.py --model mlp                      # the MLP baseline
     python train.py --loss quantile                  # 10/50/90 % quantiles
     python train.py --epochs 3 --max-train-batches 50    # quick smoke test (~1 min)
+    python train.py --no-weather                     # ablation: PM2.5 + calendar only
+
+Weather features (wind, temperature, precipitation...) are used automatically when
+data/processed/weather.npz exists (download_weather.py + prepare_weather.py).
 
 What happens
 ------------
@@ -39,8 +43,8 @@ import numpy as np
 import torch
 
 from architectures import MODELS, build_model
-from features.dataset import make_dataloaders
-from features.metrics import LOSSES, Evaluator, format_results, get_loss, output_size, point_forecast
+from dataset import make_dataloaders
+from metrics import LOSSES, Evaluator, format_results, get_loss, output_size, point_forecast
 
 
 # --------------------------------------------------------------------------- #
@@ -127,6 +131,8 @@ def parse_args():
     p.add_argument("--processed", default="data/processed")
     p.add_argument("--history", type=int, default=72, help="hours of input")
     p.add_argument("--horizon", type=int, default=24, help="hours to predict")
+    p.add_argument("--no-weather", action="store_true",
+                   help="ignore weather features even if weather.npz exists")
     p.add_argument("--train-stride", type=int, default=2,
                    help="use every k-th training window (consecutive windows overlap a lot)")
     # model
@@ -166,10 +172,13 @@ def main():
     # ---- data -------------------------------------------------------------
     loaders, info = make_dataloaders(
         args.processed, history=args.history, horizon=args.horizon,
-        batch_size=args.batch_size, train_stride=args.train_stride, num_workers=args.num_workers)
+        batch_size=args.batch_size, train_stride=args.train_stride, num_workers=args.num_workers,
+        use_weather=not args.no_weather)
     normalizer = info["normalizer"]
     print(f"Data: {info['n_nodes']} stations, samples {info['sizes']} "
           f"(train stride {args.train_stride})")
+    print(f"Inputs: {info['n_features']} features per hour and station | weather: "
+          f"{info['weather_features'] or 'none'}")
 
     # ---- model ------------------------------------------------------------
     model = build_model(args.model, info, out_size=output_size(args.loss), hidden=args.hidden,
@@ -184,7 +193,9 @@ def main():
 
     config = {**vars(args), "run_name": run_name, "n_params": n_params,
               "stations": info["stations"], "n_features": info["n_features"],
-              "n_time_features": info["n_time_features"]}
+              "n_time_features": info["n_time_features"],
+              "n_future_features": info["n_future_features"],
+              "use_weather": info["use_weather"], "weather_features": info["weather_features"]}
     (run_dir / "config.json").write_text(json.dumps(config, indent=2))
 
     # ---- training loop ----------------------------------------------------

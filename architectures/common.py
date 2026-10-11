@@ -25,7 +25,9 @@ class ForecastHead(nn.Module):
       * a learned embedding of the station          (E)  "who am I": a traffic site in
                                                          Antwerp behaves differently from a
                                                          rural site in the Ardennes
-      * the calendar features of the H future hours (H * F_time)
+      * what is known about the H future hours      (H * F_fut): calendar features, and
+                                                         the weather at THIS station when
+                                                         weather is used
     Output: (B, H, N, out_size).
 
     residual=True: the network predicts a CORRECTION to "last observed value" instead of
@@ -51,7 +53,10 @@ class ForecastHead(nn.Module):
     def forward(self, enc: torch.Tensor, x: torch.Tensor, x_future: torch.Tensor) -> torch.Tensor:
         B, N, _ = enc.shape
         emb = self.station_emb.weight.unsqueeze(0).expand(B, -1, -1)       # (B, N, E)
-        fut = x_future.reshape(B, 1, -1).expand(-1, N, -1)                 # (B, N, H*F_time)
+        if x_future.dim() == 4:      # (B, H, N, F_fut): per-station future features
+            fut = x_future.permute(0, 2, 1, 3).reshape(B, N, -1)            # (B, N, H*F_fut)
+        else:                        # (B, H, F_time): same for every station (older code)
+            fut = x_future.reshape(B, 1, -1).expand(-1, N, -1)
         out = self.mlp(torch.cat([enc, emb, fut], dim=-1))                 # (B, N, H*K)
         out = out.view(B, N, self.horizon, self.out_size).permute(0, 2, 1, 3)  # (B, H, N, K)
 
