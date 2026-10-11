@@ -1,13 +1,12 @@
 """
 download_eea.py
-===============
-Download hourly air-quality measurements from the European Environment Agency
-(EEA) Air Quality Download Service, for every monitoring station in a country.
 
+
+Download hourly air-quality measurements from the European Environment Agency (EEA) Air Quality Download Service, for every monitoring station in a country.
 Default: PM2.5, hourly, all Belgian stations, verified (E1a) + up-to-date (E2a) data.
+API docs: https://eeadmz1-downloads-api-appservice.azurewebsites.net/swagger/index.html
 
-How the EEA service works (API docs: https://eeadmz1-downloads-api-appservice.azurewebsites.net/swagger/index.html)
----------------------------------------------------------------------------------
+
 1. GET  /Pollutant          -> maps pollutant names ("PM2.5") to vocabulary URIs
 2. POST /DownloadSummary    -> how many files / MB a request represents
 3. POST /ParquetFile/urls   -> list of Parquet file URLs (one file per sampling point)
@@ -20,7 +19,6 @@ Datasets:
     3 = "historical" (Airbase, 2002-2012)
 
 Usage
------
     pip install requests pandas pyarrow tqdm
     python download_eea.py                                  # Belgium, PM2.5
     python download_eea.py --pollutants PM2.5 PM10 NO2      # several pollutants
@@ -28,7 +26,6 @@ Usage
     python download_eea.py --summary-only                   # just check the size
 
 Output
-------
     data/raw/eea/<dataset>/<COUNTRY>/*.parquet     raw files, as delivered
     data/raw/eea/stations_metadata.csv             station metadata (filtered to your countries)
     data/raw/eea/<COUNTRIES>_<POLLUTANTS>_hourly.parquet   one combined table

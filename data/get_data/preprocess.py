@@ -1,6 +1,6 @@
 """
 preprocess.py
-=============
+
 Turn the raw EEA download into a clean, model-ready dataset.
 
 Pipeline
@@ -14,7 +14,7 @@ Pipeline
  7. Select stations with enough data coverage in every split
  8. Fill only SHORT gaps (<= --max-gap hours) by interpolation; longer gaps stay missing
     and are tracked by a mask (the loss will ignore them later)
- 9. Transform: log1p (PM2.5 is very right-skewed), then z-score using TRAIN statistics only
+ 9. Transform: log1p (PM2.5 is very right-skewed), then z-score using TRAIN statistics only (NORMALIZE)
 10. Build calendar features in local Brussels time (traffic and heating follow local clocks)
 11. Save everything to data/processed/
 
@@ -278,6 +278,10 @@ def main() -> None:
     p.add_argument("--min-eval-coverage", type=float, default=0.50)
     p.add_argument("--max-gap", type=int, default=3, help="max hours to interpolate")
     p.add_argument("--norm", choices=["global", "station"], default="global")
+    p.add_argument("--keep-recent", action="store_true",
+                   help="also keep the data AFTER the test year (e.g. 2026 so far), so predict.py "
+                        "can forecast recent dates. Splits, stations and normalization are unchanged, "
+                        "so models already trained stay valid.")
     args = p.parse_args()
 
     raw_path = args.raw or next(Path("data/raw/eea").glob("*_hourly.parquet"), None)
@@ -292,7 +296,8 @@ def main() -> None:
     wide = to_wide(df, stations)
     # 6-7
     bounds = split_bounds(wide.index, args.train_start, args.val_year, args.test_year)
-    wide = wide.iloc[bounds["train"][0]:bounds["test"][1]]          # trim to used period
+    end = len(wide) if args.keep_recent else bounds["test"][1]
+    wide = wide.iloc[bounds["train"][0]:end]                          # trim to used period
     bounds = split_bounds(wide.index, args.train_start, args.val_year, args.test_year)
     cov = select_stations(wide, bounds,
                           {"train": args.min_train_coverage, "eval": args.min_eval_coverage})
@@ -341,6 +346,10 @@ def main() -> None:
     (args.out / "meta.json").write_text(json.dumps(meta, indent=2))
 
     print(f"\nSaved to {args.out}/")
+    if args.keep_recent and len(filled) > bounds["test"][1]:
+        a = bounds["test"][1]
+        print(f"  recent (not used for training/eval): {filled.index[a]:%Y-%m-%d} -> "
+              f"{filled.index[-1]:%Y-%m-%d %H:%M} UTC, available to predict.py")
     for name, (a, z) in bounds.items():
         print(f"  {name:>5}: {filled.index[a]:%Y-%m-%d} -> {filled.index[z - 1]:%Y-%m-%d} "
               f"({z - a:,} hours, {mask.iloc[a:z].values.mean():.1%} valid)")

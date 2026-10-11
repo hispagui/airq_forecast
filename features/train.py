@@ -39,8 +39,8 @@ import numpy as np
 import torch
 
 from architectures import MODELS, build_model
-from dataset import make_dataloaders
-from metrics import LOSSES, Evaluator, format_results, get_loss, output_size, point_forecast
+from features.dataset import make_dataloaders
+from features.metrics import LOSSES, Evaluator, format_results, get_loss, output_size, point_forecast
 
 
 # --------------------------------------------------------------------------- #
