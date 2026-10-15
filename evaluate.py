@@ -50,9 +50,9 @@ import numpy as np
 import pandas as pd
 import torch
 
-import metrics as M  # the metric registry lives there
-from dataset import window_inputs
-from metrics import METRICS, register_metric  # noqa: F401  (register_metric used by additions)
+import features.metrics as M  # the metric registry lives there
+from features.dataset import window_inputs
+from features.metrics import METRICS, register_metric  # noqa: F401  (register_metric used by additions)
 
 LOCAL_TZ = "Europe/Brussels"
 DEFAULT_METRICS = ["rmse", "mae", "bias", "corr", "skill_rmse"]
@@ -399,7 +399,8 @@ def save_json(res, path, meta):
 # Plots
 # =========================================================================== #
 # Series colors: models get the categorical slots in fixed order; references are neutral greys
-MODEL_COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#6250d6"]
+MODEL_COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#6250d6", "#c2407a", "#b8860b", "#17a2b8",
+                "#8c564b"]
 REF_STYLE = {"last_value": ("#52514e", "--"), "persistence": ("#9a9893", ":"),
              "climatology": ("#9a9893", "-.")}
 
@@ -416,7 +417,7 @@ def make_plots(res, true, forecasts, model_names, out_dir):
 
     def style(name):
         if name in model_names:
-            return MODEL_COLORS[model_names.index(name) % 4], "-", 2.0
+            return MODEL_COLORS[model_names.index(name) % len(MODEL_COLORS)], "-", 2.0
         c, ls = REF_STYLE.get(name, ("#9a9893", "-"))
         return c, ls, 1.5
 

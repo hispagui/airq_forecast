@@ -42,8 +42,8 @@ import pandas as pd
 import torch
 
 from architectures import build_model
-from dataset import Normalizer, load_processed, window_inputs
-from metrics import output_size, point_forecast
+from features.dataset import Normalizer, load_processed, window_inputs
+from features.metrics import output_size, point_forecast
 
 LOCAL_TZ = "Europe/Brussels"
 
@@ -122,8 +122,8 @@ class Forecaster:
 
     def forecast_weather(self, future_times: pd.DatetimeIndex) -> torch.Tensor:
         """Weather forecast for the given hours at every station, normalized: (H, N, F_w)."""
-        from download_weather import fetch_forecast
-        from prepare_weather import RAW_FOR_FEATURE, engineer_features, normalize
+        from data.get_data.download_weather import fetch_forecast
+        from data.get_data.prepare_weather import RAW_FOR_FEATURE, engineer_features, normalize
         wm = self.data.weather_meta
         coords = pd.DataFrame(wm["station_coords"])
         needed = sorted({r for f in wm["features"] for r in RAW_FOR_FEATURE[f]})

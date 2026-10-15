@@ -1,6 +1,7 @@
 # Data, reproducible with scripts
 data/raw/
 data/processed/
+features/__pycache__
 *.parquet
 *.npz
 *.nc
@@ -8,13 +9,14 @@ data/processed/
 
 # Model checkpoints and experiment logs
 checkpoints/
-runs/
 wandb/
 *.pt
 *.pth
 
 # Runs, trained data and weights?
 train.log
+runs/comparison_20261015_173949
+runs/comparison_20261015_182535
 runs/lstm_mse_20261008_231542
 runs/lstm_mse_20261009_003427
 runs/lstm_20261013_1726
@@ -22,6 +24,7 @@ runs/mlp_mse_20261009_103428
 runs/mlp_20261013_1726
 runs/gru_20261014_2220
 runs/transformer_20261014_2220
+runs/transformer_mse_20261015_175751
 runs/tcn_20261014_2220
 
 logs/
