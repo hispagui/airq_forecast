@@ -40,4 +40,4 @@ def build_model(name: str, info: dict, out_size: int = 1, **kwargs) -> nn.Module
 
 
 # Import model files so their @register_model decorators run
-from . import mlp, lstm  # noqa: E402,F401
+from . import mlp, lstm, gru, tcn, transformer  # noqa: E402,F401

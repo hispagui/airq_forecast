@@ -5,6 +5,9 @@ Train a forecaster on 2016-2023, select it on 2024, report it once on 2025.
 
     python train.py                                  # LSTM, MSE loss, default settings
     python train.py --model mlp                      # the MLP baseline
+    python train.py --model gru                      # also: tcn, transformer
+    python train.py --model tcn --model-args kernel=5          # model-specific settings
+    python train.py --model transformer --model-args patch=4 heads=8
     python train.py --loss quantile                  # 10/50/90 % quantiles
     python train.py --epochs 3 --max-train-batches 50    # quick smoke test (~1 min)
     python train.py --no-weather                     # ablation: PM2.5 + calendar only
@@ -43,8 +46,8 @@ import numpy as np
 import torch
 
 from architectures import MODELS, build_model
-from dataset import make_dataloaders
-from metrics import LOSSES, Evaluator, format_results, get_loss, output_size, point_forecast
+from features.dataset import make_dataloaders
+from features.metrics import LOSSES, Evaluator, format_results, get_loss, output_size, point_forecast
 
 
 # --------------------------------------------------------------------------- #
@@ -140,6 +143,9 @@ def parse_args():
     p.add_argument("--hidden", type=int, default=64)
     p.add_argument("--layers", type=int, default=2)
     p.add_argument("--dropout", type=float, default=0.1)
+    p.add_argument("--model-args", nargs="*", default=[], metavar="KEY=VALUE",
+                   help="model-specific settings, e.g. kernel=5 (tcn), patch=4 heads=8 "
+                        "(transformer)")
     p.add_argument("--no-residual", action="store_true",
                    help="predict the value directly instead of a correction to the last value")
     # optimization
@@ -161,8 +167,26 @@ def parse_args():
     return p.parse_args()
 
 
+def parse_model_args(items: list[str]) -> dict:
+    """['kernel=5', 'patch=4'] -> {'kernel': 5, 'patch': 4} (numbers converted)."""
+    out = {}
+    for item in items:
+        if "=" not in item:
+            raise SystemExit(f"--model-args expects KEY=VALUE, got '{item}'")
+        k, v = item.split("=", 1)
+        for cast in (int, float):
+            try:
+                v = cast(v)
+                break
+            except ValueError:
+                pass
+        out[k] = v
+    return out
+
+
 def main():
     args = parse_args()
+    args.model_args = parse_model_args(args.model_args)
     set_seed(args.seed)
     device = pick_device(args.device)
     run_name = args.run_name or f"{args.model}_{args.loss}_{datetime.now():%Y%m%d_%H%M%S}"
@@ -183,7 +207,7 @@ def main():
     # ---- model ------------------------------------------------------------
     model = build_model(args.model, info, out_size=output_size(args.loss), hidden=args.hidden,
                         layers=args.layers, dropout=args.dropout,
-                        residual=not args.no_residual).to(device)
+                        residual=not args.no_residual, **args.model_args).to(device)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Model: {args.model} | {n_params:,} parameters | loss: {args.loss} | device: {device}")
 

@@ -1,226 +1,81 @@
 """
 download_weather.py
 ===================
-Download hourly weather at every PM2.5 station from Open-Meteo (no API key needed).
+Download hourly ERA5 weather over the PM2.5 stations from the Copernicus Climate Data Store
+(CDS), one file per month.
 
-Default variables (hourly):
-    temperature_2m, relative_humidity_2m, precipitation, wind_speed_10m, wind_direction_10m,
-    surface_pressure, boundary_layer_height
-Default source: ERA5 reanalysis (0.25 deg, consistent from 1940 to ~a week ago). The last
-days, which ERA5 does not have yet, are filled with Open-Meteo's "best_match" archive
-(ECMWF IFS 9 km, no delay).
+ERA5 = ECMWF's reanalysis: the best estimate of past weather, every hour, on a 0.25 deg grid
+(~25 km), from 1940 to about one week ago.
+
+One-time setup (5 minutes)
+--------------------------
+1. Log in on https://cds.climate.copernicus.eu and open your profile page: copy your
+   "Personal Access Token". (Your password is NEVER used by the API. Never put it in code.)
+2. Create the file ~/.cdsapirc  (Windows: C:\\Users\\<you>\\.cdsapirc) containing:
+       url: https://cds.climate.copernicus.eu/api
+       key: <your-personal-access-token>
+3. Accept the licence once: open the dataset page "ERA5 hourly data on single levels from
+   1940 to present", tab "Download", scroll to "Terms of use" and click Accept.
+4. pip install cdsapi xarray netCDF4
 
 Usage
 -----
-    pip install requests pandas pyarrow
-    python download_weather.py                      # stations + period from data/processed
-    python download_weather.py --start 2016-01-01 --end 2026-10-10
-    python download_weather.py --dry-run            # show the plan and the API budget only
-    python download_weather.py --variables temperature_2m precipitation wind_speed_10m wind_direction_10m
+    python download_weather.py                    # stations + years from data/processed
+    python download_weather.py --start 2016-01 --end 2025-12
+    python download_weather.py --dry-run          # show the plan, download nothing
+    python download_weather.py --workers 2        # requests in the queue at once (default 1)
 
-Then run:  python prepare_weather.py     (aligns, engineers and normalizes the features)
+Requests are queued on the CDS servers: each month can take from ~1 minute to much longer
+when the queue is busy. The CDS also limits how many requests one user may have waiting;
+when it answers "temporarily limited", the script waits and tries again by itself. Ten years = ~120 requests, often a few hours in total. Every month is
+saved as soon as it arrives, so you can stop the script and run it again: it resumes.
+Track your requests at https://cds.climate.copernicus.eu/requests
 
-Station coordinates
--------------------
-Looked up, in order, from
-  1. --coords my_coords.csv           (columns: station, lat, lon)
-  2. data/raw/eea/stations_metadata.csv   (written by download_eea.py)
-and saved, with altitude / station type / area type when available, to
-  data/raw/weather/stations.csv       (also useful later as static node features for the GNN)
+Variables (ERA5 name -> short name in the files)
+------------------------------------------------
+    10m_u_component_of_wind              u10    wind towards the east (m/s)
+    10m_v_component_of_wind              v10    wind towards the north (m/s)
+    2m_temperature                       t2m    K
+    2m_dewpoint_temperature              d2m    K   (-> relative humidity)
+    surface_pressure                     sp     Pa
+    total_precipitation                  tp     m, over the preceding hour
+    boundary_layer_height                blh    m   (low = pollution trapped near the ground)
+    surface_solar_radiation_downwards    ssrd   J/m2 over the preceding hour
 
-Free-tier budget (non-commercial)
----------------------------------
-Open-Meteo allows 600 calls/min, 5 000/hour and 10 000/day. A request counts as
-(locations) x (days / 14) x (variables / 10, at least 1) calls, so 10 years at one location
-costs ~260 calls. To stay small the script
-  * snaps stations to the ERA5 grid (0.25 deg): stations in the same cell share one download,
-  * caches every (cell, year) file, so an interrupted run resumes where it stopped,
-  * paces itself under 80 % of each limit, using a ledger shared by successive runs.
-If the daily budget runs out it stops cleanly: run the same command again tomorrow.
+Outputs: data/raw/era5/
+    era5_YYYY_MM.nc        one file per month, the whole box around the stations
+    stations.csv           station coordinates (+ altitude, type, area when known)
 
-Outputs: data/raw/weather/
-    stations.csv              one row per station: coordinates, ERA5 cell, metadata
-    cache/<model>/*.parquet   raw API responses, one file per (cell, period)
-    weather_cells.parquet     every cell x hour (UTC), all variables, column 'source'
-
-Licence: Open-Meteo data is CC BY 4.0. Cite Open-Meteo and ERA5 (Hersbach et al. 2023).
+Then run:  python prepare_weather.py
+Citation: Hersbach et al. (2023), ERA5 hourly data on single levels from 1940 to present,
+Copernicus Climate Change Service (C3S) Climate Data Store, doi:10.24381/cds.adbb2d47
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import math
 import sys
+import threading
 import time
-from collections import deque
+import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import requests
 
-ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
-FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
-
-DEFAULT_VARIABLES = [
-    "temperature_2m", "relative_humidity_2m", "precipitation",
-    "wind_speed_10m", "wind_direction_10m", "surface_pressure", "boundary_layer_height",
+DATASET = "reanalysis-era5-single-levels"
+VARIABLES = [
+    "10m_u_component_of_wind", "10m_v_component_of_wind",
+    "2m_temperature", "2m_dewpoint_temperature",
+    "surface_pressure", "total_precipitation",
+    "boundary_layer_height", "surface_solar_radiation_downwards",
 ]
-ERA5_DELAY_DAYS = 7          # ERA5 is published with ~5 days delay; keep a margin
-FREE_LIMITS = ((60, 600), (3600, 5_000), (86_400, 10_000))   # (window in s, calls)
-SAFETY = 0.8                 # use at most 80 % of each limit
-MAX_WEIGHT_PER_REQUEST = 200.0
-
-
-class DailyLimitReached(RuntimeError):
-    pass
-
-
-class ApiError(RuntimeError):
-    pass
-
-
-# --------------------------------------------------------------------------- #
-# Call budget: counts calls the way Open-Meteo does and waits when needed
-# --------------------------------------------------------------------------- #
-def call_weight(n_locations: int, n_days: float, n_variables: int) -> float:
-    return n_locations * max(1.0, n_days / 14) * max(1.0, n_variables / 10)
-
-
-class CallBudget:
-    """Sliding-window limiter over the free-tier limits. The ledger (time, weight) is saved
-    to disk so that two runs in the same hour/day do not exceed the limits together."""
-
-    def __init__(self, ledger_path: Path | None = None, safety: float = SAFETY):
-        self.safety, self.path = safety, ledger_path
-        self.events: deque[tuple[float, float]] = deque()
-        if ledger_path and ledger_path.exists():
-            try:
-                now = time.time()
-                self.events.extend((t, w) for t, w in json.loads(ledger_path.read_text())
-                                   if t > now - 86_400)
-            except (ValueError, TypeError):
-                pass
-
-    def _used(self, now: float, window: float) -> float:
-        return sum(w for t, w in self.events if t > now - window)
-
-    def wait(self, weight: float) -> None:
-        while True:
-            now = time.time()
-            while self.events and self.events[0][0] <= now - 86_400:
-                self.events.popleft()
-            sleep = 0.0
-            for window, limit in FREE_LIMITS:
-                cap = limit * self.safety
-                used = self._used(now, window)
-                if used + weight <= cap:
-                    continue
-                if window == 86_400:
-                    raise DailyLimitReached(
-                        f"Daily budget reached ({used:.0f} of {cap:.0f} calls used in 24 h).")
-                # Wait until enough old calls leave the window
-                freed = 0.0
-                for t, w in self.events:
-                    if t <= now - window:
-                        continue
-                    freed += w
-                    if used - freed + weight <= cap:
-                        sleep = max(sleep, t + window - now + 1)
-                        break
-            if sleep <= 0:
-                return
-            print(f"  ... pacing: waiting {sleep / 60:.1f} min to stay under the free-tier limits")
-            time.sleep(sleep)
-
-    def record(self, weight: float) -> None:
-        self.events.append((time.time(), weight))
-        if self.path:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(json.dumps(list(self.events)))
-
-
-# --------------------------------------------------------------------------- #
-# HTTP
-# --------------------------------------------------------------------------- #
-_session = requests.Session()
-
-
-def api_get(url: str, params: dict, budget: CallBudget | None, weight: float,
-            retries: int = 6) -> list[dict]:
-    """GET with pacing and retries. Always returns a list (one dict per location)."""
-    for attempt in range(retries):
-        if budget:
-            budget.wait(weight)
-        try:
-            r = _session.get(url, params=params, timeout=180)
-        except requests.RequestException as e:
-            wait = 10 * 2 ** attempt
-            print(f"  ! {e.__class__.__name__}; retrying in {wait}s")
-            time.sleep(wait)
-            continue
-        if budget:
-            budget.record(weight)
-        if r.status_code == 200:
-            out = r.json()
-            return out if isinstance(out, list) else [out]
-        try:
-            reason = r.json().get("reason", r.text[:300])
-        except ValueError:
-            reason = r.text[:300]
-        if r.status_code == 429:
-            low = reason.lower()
-            if "daily" in low:
-                raise DailyLimitReached(reason)
-            wait = 65 if "minut" in low else 15 * 60
-            print(f"  ! Rate limited ({reason}); waiting {wait // 60} min")
-            time.sleep(wait)
-            continue
-        if r.status_code == 400:
-            raise ApiError(reason)
-        wait = 10 * 2 ** attempt
-        print(f"  ! HTTP {r.status_code} ({reason}); retrying in {wait}s")
-        time.sleep(wait)
-    raise RuntimeError(f"Giving up on {url} after {retries} attempts.")
-
-
-def parse_location(loc: dict, variables: list[str]) -> pd.DataFrame:
-    """One location of an Open-Meteo JSON response -> DataFrame indexed by UTC hour."""
-    hourly = loc.get("hourly", {})
-    # nanosecond resolution: second-resolution timestamps do not survive a parquet round-trip
-    # with every pandas/pyarrow version
-    secs = np.asarray(hourly.get("time", []), dtype="int64")
-    times = pd.DatetimeIndex(pd.to_datetime(secs * 1_000_000_000, unit="ns", utc=True))
-    df = pd.DataFrame({v: np.asarray(hourly.get(v, [np.nan] * len(times)), dtype="float64")
-                       for v in variables}, index=times)
-    df.index.name = "time"
-    return df
-
-
-_REJECTED: dict[tuple[str, str], set[str]] = {}   # (url, model) -> variables the API refused
-
-
-def fetch_with_fallback(url: str, base_params: dict, variables: list[str],
-                        budget: CallBudget | None, weight_fn) -> tuple[list[dict], list[str]]:
-    """Request `variables`; if the API rejects one (e.g. not available in this model),
-    drop it, remember it for the next requests, and try again.
-    Returns (response, variables actually obtained)."""
-    rejected = _REJECTED.setdefault((url, base_params.get("models", "")), set())
-    variables = [v for v in variables if v not in rejected]
-    while variables:
-        params = {**base_params, "hourly": ",".join(variables)}
-        try:
-            return api_get(url, params, budget, weight_fn(len(variables))), variables
-        except ApiError as e:
-            bad = [v for v in variables if v in str(e)]
-            if not bad:
-                raise
-            print(f"  ! The API rejected {bad} ({e}). Continuing without it.")
-            rejected.update(bad)
-            variables = [v for v in variables if v not in bad]
-    raise ApiError("No variable left to request.")
+ERA5_DELAY_DAYS = 6          # ERA5 (preliminary "ERA5T") appears ~5 days after real time
+MARGIN_DEG = 0.5             # box around the stations, so interpolation has neighbours
+GRID = 0.25
 
 
 # --------------------------------------------------------------------------- #
@@ -289,211 +144,225 @@ def resolve_coordinates(stations: list[str], metadata_csv: Path,
     return pd.DataFrame(rows)
 
 
-def assign_cells(coords: pd.DataFrame, grid: float) -> pd.DataFrame:
-    """Snap each station to the model grid so stations in the same cell share one download."""
-    out = coords.copy()
-    if grid > 0:
-        out["cell_lat"] = (np.round(out["lat"] / grid) * grid).round(4)
-        out["cell_lon"] = (np.round(out["lon"] / grid) * grid).round(4)
-    else:
-        out["cell_lat"], out["cell_lon"] = out["lat"].round(4), out["lon"].round(4)
-    out["cell"] = [f"{a:.4f}_{b:.4f}" for a, b in zip(out["cell_lat"], out["cell_lon"])]
+def bounding_box(coords: pd.DataFrame, margin: float = MARGIN_DEG) -> list[float]:
+    """[North, West, South, East] on the 0.25 deg grid, with a margin around the stations."""
+    snap_up = lambda x: float(np.ceil(x / GRID) * GRID)      # noqa: E731
+    snap_dn = lambda x: float(np.floor(x / GRID) * GRID)     # noqa: E731
+    return [snap_up(coords["lat"].max() + margin), snap_dn(coords["lon"].min() - margin),
+            snap_dn(coords["lat"].min() - margin), snap_up(coords["lon"].max() + margin)]
+
+
+# --------------------------------------------------------------------------- #
+# Requests
+# --------------------------------------------------------------------------- #
+def month_list(start: date, end: date) -> list[tuple[int, int]]:
+    out, y, m = [], start.year, start.month
+    while (y, m) <= (end.year, end.month):
+        out.append((y, m))
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
     return out
 
 
-# --------------------------------------------------------------------------- #
-# Download plan
-# --------------------------------------------------------------------------- #
-def year_chunks(start: date, end: date) -> list[tuple[date, date]]:
-    chunks, y = [], start.year
-    while y <= end.year:
-        a, z = max(start, date(y, 1, 1)), min(end, date(y, 12, 31))
-        chunks.append((a, z))
-        y += 1
-    return chunks
+def days_in(year: int, month: int, last_day: date) -> list[int]:
+    first = date(year, month, 1)
+    nxt = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
+    end = min(nxt - timedelta(days=1), last_day)
+    return list(range(1, end.day + 1)) if end >= first else []
 
 
-def chunk_path(cache: Path, model: str, cell: str, a: date, z: date) -> Path:
-    return cache / model / f"{cell}_{a:%Y%m%d}_{z:%Y%m%d}.parquet"
+def month_file(out: Path, year: int, month: int, n_days: int, complete: bool) -> Path:
+    # An incomplete (current) month gets the number of days in its name, so a later run
+    # downloads it again once more days are available.
+    tag = "" if complete else f"_partial{n_days:02d}"
+    return out / f"era5_{year}_{month:02d}{tag}.nc"
 
 
-def download_archive(cells: pd.DataFrame, start: date, end: date, model: str,
-                     variables: list[str], cache: Path, budget: CallBudget,
-                     dry_run: bool = False) -> list[Path]:
-    """Download every (cell, year) chunk that is not cached yet. Returns all chunk paths."""
-    jobs = []                                       # (a, z, cell, lat, lon, path)
-    for a, z in year_chunks(start, end):
-        for _, c in cells.iterrows():
-            jobs.append((a, z, c["cell"], c["cell_lat"], c["cell_lon"],
-                         chunk_path(cache, model, c["cell"], a, z)))
-    todo = [j for j in jobs if not j[-1].exists()]
-    cost = sum(call_weight(1, (j[1] - j[0]).days + 1, len(variables)) for j in todo)
-    print(f"[{model}] {start} -> {end}: {len(jobs)} chunks, {len(jobs) - len(todo)} cached, "
-          f"{len(todo)} to download (~{cost:,.0f} API calls)")
-    if cost > FREE_LIMITS[2][1] * SAFETY:
-        print(f"  Note: more than one day of free budget. The script stops when the daily budget "
-              f"is used; re-run it tomorrow and it resumes ({math.ceil(cost / 8000)} days).")
-    if dry_run or not todo:
-        return [j[-1] for j in jobs]
-
-    # Group cells of the same period into multi-location requests
-    by_period: dict[tuple[date, date], list] = {}
-    for j in todo:
-        by_period.setdefault((j[0], j[1]), []).append(j)
-    done = 0
-    for (a, z), group in by_period.items():
-        days = (z - a).days + 1
-        per_req = max(1, int(MAX_WEIGHT_PER_REQUEST // call_weight(1, days, len(variables))))
-        for i in range(0, len(group), per_req):
-            batch = group[i:i + per_req]
-            params = {
-                "latitude": ",".join(f"{j[3]:.4f}" for j in batch),
-                "longitude": ",".join(f"{j[4]:.4f}" for j in batch),
-                "start_date": f"{a:%Y-%m-%d}", "end_date": f"{z:%Y-%m-%d}",
-                "models": model, "wind_speed_unit": "ms", "timeformat": "unixtime",
-                "timezone": "GMT", "cell_selection": "nearest",
-            }
-            resp, got = fetch_with_fallback(
-                ARCHIVE_URL, params, variables, budget,
-                lambda nv, n=len(batch), d=days: call_weight(n, d, nv))
-            if len(resp) != len(batch):
-                raise RuntimeError(f"Expected {len(batch)} locations, got {len(resp)}.")
-            for j, loc in zip(batch, resp):
-                df = parse_location(loc, got)
-                j[-1].parent.mkdir(parents=True, exist_ok=True)
-                df.to_parquet(j[-1])
-            done += len(batch)
-            print(f"  {a.year}: {done}/{len(todo)} chunks done")
-    return [j[-1] for j in jobs]
+def build_request(year: int, month: int, days: list[int], area: list[float],
+                  variables: list[str]) -> dict:
+    return {
+        "product_type": ["reanalysis"],
+        "variable": variables,
+        "year": [f"{year}"],
+        "month": [f"{month:02d}"],
+        "day": [f"{d:02d}" for d in days],
+        "time": [f"{h:02d}:00" for h in range(24)],
+        "area": area,                                   # North, West, South, East
+        "data_format": "netcdf",
+        "download_format": "unarchived",
+    }
 
 
-# --------------------------------------------------------------------------- #
-# Forecast weather (used by predict.py for genuine forecasts beyond the data)
-# --------------------------------------------------------------------------- #
-def fetch_forecast(lats, lons, times_utc: pd.DatetimeIndex,
-                   variables: list[str] = DEFAULT_VARIABLES) -> pd.DataFrame:
-    """Hourly forecast (or recent past) weather at given points from the Forecast API.
-    Returns a long DataFrame: point (index into lats), time (UTC), one column per variable.
-    Variables the API does not return come back as NaN."""
-    now = pd.Timestamp.now(tz="UTC")
-    past_days = int(np.clip(math.ceil((now - times_utc.min()) / pd.Timedelta(days=1)) + 1, 0, 92))
-    fc_days = int(np.clip(math.ceil((times_utc.max() - now) / pd.Timedelta(days=1)) + 1, 1, 16))
-    params = {"latitude": ",".join(f"{x:.4f}" for x in lats),
-              "longitude": ",".join(f"{x:.4f}" for x in lons),
-              "past_days": past_days, "forecast_days": fc_days,
-              "wind_speed_unit": "ms", "timeformat": "unixtime", "timezone": "GMT"}
-    resp, got = fetch_with_fallback(FORECAST_URL, params, variables, None, lambda nv: 1.0)
-    frames = []
-    for i, loc in enumerate(resp):
-        df = parse_location(loc, got).reindex(times_utc)
-        for v in variables:
-            if v not in df:
-                df[v] = np.nan
-        df["point"] = i
-        frames.append(df.rename_axis("time").reset_index())
-    return pd.concat(frames, ignore_index=True)
+def normalize_download(path: Path) -> None:
+    """The CDS sometimes sends a zip of several NetCDF files (instantaneous variables and
+    accumulated ones separately), even when asked for 'unarchived'. Merge them into one file."""
+    if not zipfile.is_zipfile(path):
+        return
+    import xarray as xr
+    tmp = path.with_suffix(".parts")
+    tmp.mkdir(exist_ok=True)
+    with zipfile.ZipFile(path) as zf:
+        zf.extractall(tmp)
+    parts = sorted(tmp.rglob("*.nc"))
+    ds = xr.merge([xr.open_dataset(p).load() for p in parts], compat="override")
+    path.unlink()
+    ds.to_netcdf(path)
+    for p in parts:
+        p.unlink()
+    for d in sorted(tmp.rglob("*"), reverse=True):
+        d.rmdir()
+    tmp.rmdir()
+
+
+_print_lock = threading.Lock()
+_netcdf_lock = threading.Lock()   # the HDF5 library behind NetCDF is not thread-safe
+
+
+def say(msg: str) -> None:
+    with _print_lock:
+        print(msg, flush=True)
+
+
+def download_month(client, year: int, month: int, days: list[int], area, variables,
+                   target: Path) -> Path:
+    part = target.with_suffix(".download")
+    request = build_request(year, month, days, area, variables)
+    if part.exists():                     # downloaded by an earlier run, not yet processed
+        try:
+            with _netcdf_lock:
+                normalize_download(part)
+            part.rename(target)
+            say(f"  saved {target.name} (reused an earlier download)")
+            return target
+        except Exception as e:
+            if "numpy" in str(e).lower() or "np." in str(e):
+                raise                     # a library problem, not a bad file: keep the file
+            say(f"  ! earlier download of {year}-{month:02d} unreadable ({e}); downloading again")
+            part.unlink()
+    for attempt in range(1, 61):
+        say(f"  requesting {year}-{month:02d} ({len(days)} days)"
+            + (f", attempt {attempt}" if attempt > 1 else "") + "...")
+        try:
+            client.retrieve(DATASET, request, str(part))
+            break
+        except Exception as e:
+            msg = str(e).lower()
+            if "temporarily limited" not in msg and "queued requests" not in msg:
+                raise
+            wait = min(60 * attempt, 600)          # 1, 2, ... up to 10 minutes
+            say(f"  ... CDS queue limit reached for {year}-{month:02d}; retrying in "
+                f"{wait // 60} min")
+            time.sleep(wait)
+    else:
+        raise RuntimeError("CDS queue still limited after many retries; run again later.")
+    with _netcdf_lock:                    # downloads run in parallel, file handling does not
+        normalize_download(part)
+    part.rename(target)
+    # Remove older partial versions of this month
+    for old in target.parent.glob(f"era5_{year}_{month:02d}_partial*.nc"):
+        if old != target:
+            old.unlink()
+    say(f"  saved {target.name}")
+    return target
 
 
 # --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
-def processed_period_and_stations(processed: str):
-    """Stations and time range of the PM2.5 data (so the weather covers exactly that)."""
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from dataset import find_processed_dir
+def processed_info(processed: str):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from features.dataset import find_processed_dir
     d = find_processed_dir(processed)
     meta = json.loads((d / "meta.json").read_text())
     ts = np.load(d / "dataset.npz")["timestamps"]
     unit = "ns" if ts.max() > 1e17 else "us"
     times = pd.to_datetime(ts[[0, -1]], unit=unit, utc=True)
-    return meta["stations"], times[0].date(), times[1].date(), d
+    return meta["stations"], times[0].date(), times[1].date()
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="Download hourly weather at the PM2.5 stations.")
+    p = argparse.ArgumentParser(description="Download ERA5 hourly weather from the CDS.")
     p.add_argument("--processed", default="data/processed",
                    help="processed PM2.5 data (gives the stations and the period)")
     p.add_argument("--metadata", type=Path, default=Path("data/raw/eea/stations_metadata.csv"))
     p.add_argument("--coords", type=Path, default=None,
-                   help="optional CSV with columns station, lat, lon (overrides the EEA metadata)")
-    p.add_argument("--start", default=None, help="YYYY-MM-DD (default: start of the PM2.5 data)")
-    p.add_argument("--end", default=None, help="YYYY-MM-DD (default: end of the PM2.5 data)")
-    p.add_argument("--variables", nargs="+", default=DEFAULT_VARIABLES)
-    p.add_argument("--model", default="era5",
-                   help="Open-Meteo reanalysis: era5 (default), era5_seamless, era5_land, "
-                        "ecmwf_ifs, best_match")
-    p.add_argument("--grid", type=float, default=None,
-                   help="snap stations to this grid in degrees (default 0.25 for era5*, "
-                        "0.1 for era5_land, 0 = no snapping)")
-    p.add_argument("--no-recent", action="store_true",
-                   help="do not fill the last days (not yet in ERA5) with best_match")
-    p.add_argument("--out", type=Path, default=Path("data/raw/weather"))
-    p.add_argument("--dry-run", action="store_true", help="print the plan and the cost only")
+                   help="optional CSV with columns station, lat, lon")
+    p.add_argument("--start", default=None, help="YYYY-MM (default: start of the PM2.5 data)")
+    p.add_argument("--end", default=None, help="YYYY-MM (default: end of the PM2.5 data)")
+    p.add_argument("--variables", nargs="+", default=VARIABLES, help="ERA5 variable names")
+    p.add_argument("--workers", type=int, default=1,
+                   help="requests in the CDS queue at once (the CDS limits this per user)")
+    p.add_argument("--out", type=Path, default=Path("data/raw/era5"))
+    p.add_argument("--dry-run", action="store_true")
     args = p.parse_args()
 
-    stations, d0, d1, _ = processed_period_and_stations(args.processed)
-    start = date.fromisoformat(args.start) if args.start else d0 - timedelta(days=1)
-    end = date.fromisoformat(args.end) if args.end else d1 + timedelta(days=1)
-    today = datetime.now(timezone.utc).date()
-    end = min(end, today)
-    print(f"{len(stations)} stations | {start} -> {end} | model {args.model}")
-    print(f"Variables: {args.variables}")
+    stations, d0, d1 = processed_info(args.processed)
+    start = (datetime.strptime(args.start, "%Y-%m").date() if args.start
+             else d0 - timedelta(days=1))
+    end = d1 + timedelta(days=1)
+    if args.end:
+        e = datetime.strptime(args.end, "%Y-%m").date()
+        end = (date(e.year + 1, 1, 1) if e.month == 12 else date(e.year, e.month + 1, 1)) \
+            - timedelta(days=1)
+    last_available = datetime.now(timezone.utc).date() - timedelta(days=ERA5_DELAY_DAYS)
+    end = min(end, last_available)
 
     coords = resolve_coordinates(stations, args.metadata, args.coords)
-    grid = args.grid if args.grid is not None else (
-        0.1 if args.model == "era5_land" else 0.25 if args.model.startswith("era5") else 0.0)
-    coords = assign_cells(coords, grid)
-    cells = coords.drop_duplicates("cell")[["cell", "cell_lat", "cell_lon"]].reset_index(drop=True)
-    print(f"{len(stations)} stations fall into {len(cells)} distinct grid cells "
-          f"(grid {grid or 'none'} deg)")
+    area = bounding_box(coords)
     args.out.mkdir(parents=True, exist_ok=True)
     coords.to_csv(args.out / "stations.csv", index=False)
 
-    cache = args.out / "cache"
-    budget = CallBudget(cache / "call_ledger.json")
-    is_era5 = args.model.startswith("era5")
-    main_end = min(end, today - timedelta(days=ERA5_DELAY_DAYS)) if is_era5 else end
-    tasks = [(args.model, start, main_end)]
-    if is_era5 and not args.no_recent and end > main_end:
-        tasks.append(("best_match", main_end + timedelta(days=1), end))
-
-    paths: list[tuple[str, Path]] = []
-    try:
-        for model, a, z in tasks:
-            for path in download_archive(cells, a, z, model, args.variables, cache, budget,
-                                         args.dry_run):
-                paths.append((model, path))
-    except DailyLimitReached as e:
-        print(f"\n{e}\nEverything downloaded so far is cached. Run the same command tomorrow "
-              "to continue.")
-        sys.exit(2)
-    if args.dry_run:
+    jobs = []
+    for y, m in month_list(start, end):
+        days = days_in(y, m, end)
+        if not days:
+            continue
+        complete = len(days) == days_in(y, m, date(9999, 1, 1))[-1]
+        target = month_file(args.out, y, m, len(days), complete)
+        if not target.exists():
+            jobs.append((y, m, days, target))
+    n_months = len(month_list(start, end))
+    print(f"{len(stations)} stations | {start} -> {end} | box N/W/S/E = {area}")
+    print(f"{len(args.variables)} variables | {n_months} months, {n_months - len(jobs)} already "
+          f"downloaded, {len(jobs)} to request")
+    if args.dry_run or not jobs:
+        print("Nothing to do." if not jobs else "(dry run: nothing requested)")
         return
 
-    # Combine all chunks: one row per (cell, hour). ERA5 wins over best_match on overlaps.
-    frames = []
-    for model, path in paths:
-        df = pd.read_parquet(path)
-        df["cell"] = path.name.rsplit("_", 2)[0]
-        df["source"] = model
-        frames.append(df.reset_index())
-    data = pd.concat(frames, ignore_index=True)
-    data["time"] = pd.to_datetime(data["time"], utc=True).dt.as_unit("ns")
-    data["_prio"] = (data["source"] != args.model).astype(int)
-    data = (data.sort_values(["_prio"]).drop_duplicates(["cell", "time"])
-                .drop(columns="_prio").sort_values(["cell", "time"]).reset_index(drop=True))
-    out_file = args.out / "weather_cells.parquet"
-    data.to_parquet(out_file, index=False)
+    try:
+        import cdsapi
+    except ImportError:
+        raise SystemExit("pip install cdsapi xarray netCDF4")
+    try:
+        client = cdsapi.Client(quiet=True, progress=False)
+    except Exception as e:
+        raise SystemExit(f"Could not start the CDS client ({e}).\nCreate ~/.cdsapirc with your "
+                         "personal access token (see the top of this file).")
 
-    print(f"\nSaved {len(data):,} rows ({data['cell'].nunique()} cells) -> {out_file}")
-    print(f"Time range (UTC): {data['time'].min()} -> {data['time'].max()}")
-    print("Missing values per variable:")
-    for v in args.variables:
-        if v in data:
-            print(f"  {v:<24} {data[v].isna().mean():6.2%}")
-        else:
-            print(f"  {v:<24} not available")
-    print("\nNext: python prepare_weather.py")
+    failed = []
+    with ThreadPoolExecutor(max_workers=args.workers) as pool:
+        futures = {pool.submit(download_month, client, y, m, days, area, args.variables, t):
+                   (y, m) for y, m, days, t in jobs}
+        for fut in as_completed(futures):
+            y, m = futures[fut]
+            try:
+                fut.result()
+            except Exception as e:
+                failed.append((y, m))
+                msg = str(e)
+                if "numpy" in msg.lower() or "np." in msg:
+                    msg += ("\n    -> outdated library. Run: pip install -U xarray netCDF4 cftime"
+                            "\n       (the downloaded file is kept and reused next time)")
+                if "licence" in msg.lower() or "license" in msg.lower():
+                    msg += ("\n    -> accept the ERA5 licence on the dataset page "
+                            "(tab Download, 'Terms of use').")
+                if "401" in msg or "authentication" in msg.lower():
+                    msg += "\n    -> check the token in ~/.cdsapirc."
+                say(f"  ! {y}-{m:02d} failed: {msg}")
+    print(f"\nDone: {len(jobs) - len(failed)} months downloaded, {len(failed)} failed.")
+    if failed:
+        print("Run the same command again to retry the failed months.")
+    else:
+        print("Next: python prepare_weather.py")
 
 
 if __name__ == "__main__":

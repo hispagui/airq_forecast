@@ -41,10 +41,40 @@ Further amelioration of model, using Perceval, test/evaluate results against GDL
 
 
 ## Data
-Run download_eea.py then preprocess.py
+
+To get the data from wources:
+    - `download_eea.py`
+    - `download_weather.py`
+Sends everything to `data` $\rightarrow$ `raw`
+
+To process downloaded data:
+    - `preprocess.py` (for the eea data)
+    - `prepare.py` (for weather statistics)
+Sends everything to `data` $\rightarrow$ `processed`
+
+(weather data might take some time to download, furstrating API for ERA5 (copernicus), also you need to setup an account and produce a personal token.)
 
 ## Training
-Model was trained on [...] data from the EEA, for stations located in Belgium.
+This project has several model architectures, that can all be trained via the same call.
+They are stored in architectures, and we have:
+    - `lstm.py` (default), Long Short-Term Memory: reads each station’s 72 hours one by one, keeping a memory vector that summarizes level, trend and daily pattern.
+    - `mlp.py`, Multi-Layer Perceptron: flattens the 72 hours into one vector without any notion of order. It’s a lower bound that shows what the LSTM’s sequential reading adds.
+
+## Evaluations
+
+
+
+
+
+
+## Predictions
+
+`prediction.py` returns a forecast_YYYYMMDD_HHMM.csv file
+
+Looks as the data 72h before and predicts data for the next day (24h following).
+
+Each columns corresponds to an air monitoring station, and for each row, it outputs the average for <i>micrograms of fine particules per cubic metre<i> predicted for that hour.
+
 
 
 
@@ -55,23 +85,3 @@ Model was trained on [...] data from the EEA, for stations located in Belgium.
 - Jacob, Introduction to Atmospheric Chemistry, Princeton University Press, 1999.
 - WHO Global Air Quality Guidelines (2021)
 - EU Directive 2024/2881
-
-## Structure:
-...
-
-
-## Models
-- LSTM (Long Short-Term Memory): reads each station’s 72 hours one by one, keeping a memory vector that summarizes level, trend and daily pattern.
-
-    [... explain more the neural network]
-
-- MLP (Multi-Layer Perceptron): flattens the 72 hours into one vector without any notion of order. It’s a lower bound that shows what the LSTM’s sequential reading adds.
-
-## Predictions
-
-`prediction.py` returns a forecast_YYYYMMDD_HHMM.csv file
-
-Looks as the data 72h before and predicts data for the next day (24h following).
-
-Each columns corresponds to an air monitoring station, and for each row, it outputs the average for <i>micrograms of fine particules per cubic metre<i> predicted for that hour.
-

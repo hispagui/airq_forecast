@@ -333,7 +333,7 @@ def _synthetic_test():
 
 def _real_data_test(processed: str, split: str, max_batches: int | None):
     """Score simple reference forecasts on real data, so you know what loss values mean."""
-    from features.dataset import make_dataloaders  # local import: metrics.py works without dataset.py
+    from dataset import make_dataloaders  # local import: metrics.py works without dataset.py
 
     loaders, info = make_dataloaders(processed, history=72, horizon=24, batch_size=256)
     data, norm = info["data"], info["normalizer"]
@@ -406,7 +406,7 @@ if __name__ == "__main__":
     _synthetic_test()
     if not args.synthetic:
         try:
-            from features.dataset import find_processed_dir
+            from dataset import find_processed_dir
         except ImportError:
             raise SystemExit("\n! Cannot import dataset.py. Put metrics.py and dataset.py in the "
                              "same folder (or run from the folder that contains dataset.py).")

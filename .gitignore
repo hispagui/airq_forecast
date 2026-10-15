@@ -17,8 +17,18 @@ wandb/
 train.log
 runs/lstm_mse_20261008_231542
 runs/lstm_mse_20261009_003427
+runs/lstm_20261013_1726
 runs/mlp_mse_20261009_103428
+runs/mlp_20261013_1726
+runs/gru_20261014_2220
+runs/transformer_20261014_2220
+runs/tcn_20261014_2220
 
+logs/
+
+run_all.sh
+
+PROJECT_GUIDE.md
 
 # Byte-compiled / optimized / DLL files
 architectures/__pycache__/
