@@ -30,6 +30,7 @@ runs/tcn_20261014_2220
 logs/
 
 run_all.sh
+run_phase2.sh
 
 PROJECT_GUIDE.md
 

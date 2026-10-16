@@ -24,7 +24,7 @@ Every model in the project (MLP, LSTM, GNN, hybrid quantum) gets the SAME batch:
 with B = batch, L = history length, H = horizon, N = number of stations.
     F_in  = [pm25_normalized, observed_flag, *weather (F_w), *calendar (7)]  = 9 + F_w
     F_fut = [*weather (F_w), *calendar (7)]                                 = 7 + F_w
-The weather (F_w features) comes from prepare_weather.py (weather.npz). Without it, or
+The weather (F_w features, ERA5) comes from prepare_weather.py (weather.npz). Without it, or
 with use_weather=False, F_w = 0 and the inputs are exactly the Phase-1 ones.
 
 Leakage rules
@@ -71,6 +71,7 @@ class ProcessedData:
     weather: torch.Tensor | None = None       # (T, N, F_w) normalized weather features
     weather_raw: np.ndarray | None = None     # (T, N, 3) wind_u, wind_v (m/s), precip (mm)
     weather_meta: dict | None = None          # feature names, normalization, sources
+    weather_valid: np.ndarray | None = None   # (T, N) True where the weather is real data
 
     @property
     def weather_features(self) -> list[str]:
@@ -105,16 +106,18 @@ def load_weather(processed_dir: Path, stations: list[str], timestamps: np.ndarra
     """weather.npz + weather_meta.json from prepare_weather.py, if present and up to date."""
     f, m = processed_dir / "weather.npz", processed_dir / "weather_meta.json"
     if not (f.exists() and m.exists()):
-        return None, None, None
+        return None, None, None, None
     wmeta = json.loads(m.read_text())
     if (wmeta["stations"] != stations or wmeta["n_times"] != len(timestamps)
             or wmeta["first_timestamp"] != int(timestamps[0])
             or wmeta["last_timestamp"] != int(timestamps[-1])):
         print("! weather.npz does not match the PM2.5 data (preprocess.py was re-run?). "
               "Ignoring it. Run: python prepare_weather.py")
-        return None, None, None
+        return None, None, None, None
     arrays = np.load(f)
-    return torch.from_numpy(arrays["features"].astype(np.float32)), arrays["raw"], wmeta
+    valid = arrays["valid"] if "valid" in arrays.files else np.ones(arrays["raw"].shape[:2], bool)
+    return (torch.from_numpy(arrays["features"].astype(np.float32)), arrays["raw"], wmeta,
+            valid)
 
 
 def load_processed(processed_dir: str | Path, with_weather: bool = True) -> ProcessedData:
@@ -133,12 +136,13 @@ def load_processed(processed_dir: str | Path, with_weather: bool = True) -> Proc
         mean = np.array([norm["mean"][s] for s in stations], dtype=np.float32)
         std = np.array([norm["std"][s] for s in stations], dtype=np.float32)
 
-    weather, weather_raw, wmeta = (load_weather(processed_dir, stations, arrays["timestamps"])
-                                   if with_weather else (None, None, None))
+    weather, weather_raw, wmeta, wvalid = (
+        load_weather(processed_dir, stations, arrays["timestamps"])
+        if with_weather else (None, None, None, None))
     if wmeta:
         print(f"Weather features: {wmeta['features']}")
     return ProcessedData(
-        weather=weather, weather_raw=weather_raw, weather_meta=wmeta,
+        weather=weather, weather_raw=weather_raw, weather_meta=wmeta, weather_valid=wvalid,
         values=torch.from_numpy(arrays["values"].astype(np.float32)),
         mask=torch.from_numpy(arrays["mask"].astype(bool)),
         raw=arrays["raw"],
@@ -295,6 +299,7 @@ def make_dataloaders(
     min_target_valid: float = 0.5,
     use_weather: bool = True,
 ) -> tuple[dict[str, DataLoader], dict]:
+    processed_dir = find_processed_dir(processed_dir)
     data = load_processed(processed_dir)
     if use_weather and data.weather is None:
         print("No weather features found (run download_weather.py + prepare_weather.py): "
@@ -324,6 +329,7 @@ def make_dataloaders(
         "use_weather": use_weather,
         "weather_features": data.weather_features if use_weather else [],
         "feature_names": in_names,
+        "processed": str(processed_dir),
         "future_feature_names": fut_names,
         "history": history,
         "horizon": horizon,

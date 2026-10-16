@@ -92,7 +92,7 @@ This is our minimum bar, if our models cannot beat the persitence model, then th
 "If tomorrow's forecast says PM2.5 $\ge 15 \mu g / m^3$, we warn the public." 
 
 
-In our tests, the best performing model was GRU
+In our tests, the best performing model was GRU, 
 
 
 
@@ -120,6 +120,20 @@ Each columns corresponds to an air monitoring station, and for each row, it outp
 
 ## Phase 2
 
+The idea is that acknowledging that air concentration prediction is impacted by geographical location, we can use the proximity of stations in the learning of our models to increase precision. 
+In this second phase, weather data are immensly more useful, edges between nodes (stations) are dependent on the wind for example!
+
+Indeed, the central idea that we borrowed from [6], i.e. the winds decides which edges matter is implemented as follow:
+- 
+
+What we did not implement from [7], is the 
+
+GNN (graph neural network) is an <i>encode<i> then <i>propagate<i> neural network, with wind-dependnt edges
+
+The graph layers add about 17000 parameters which amounts to 142920 in total, about the size of the LSTM model, so comparison is fair!
+
+
+
 
 
 
@@ -141,8 +155,10 @@ Each columns corresponds to an air monitoring station, and for each row, it outp
 
 ## Litterature
 
-- Jolliffe & Stephenson (eds.), Forecast Verification: A Practitioner’s Guide in Atmospheric Science, 2nd ed., Wiley, 2012.
-- Gneiting, “Making and evaluating point forecasts”, Journal of the American Statistical Association, 2011.
-- Jacob, Introduction to Atmospheric Chemistry, Princeton University Press, 1999.
-- WHO Global Air Quality Guidelines (2021)
-- EU Directive 2024/2881
+-[1] Jolliffe & Stephenson (eds.), Forecast Verification: A Practitioner’s Guide in Atmospheric Science, 2nd ed., Wiley, 2012.
+-[2] Gneiting, “Making and evaluating point forecasts”, Journal of the American Statistical Association, 2011.
+-[3] Jacob, Introduction to Atmospheric Chemistry, Princeton University Press, 1999.
+-[4] WHO Global Air Quality Guidelines (2021)
+-[5] EU Directive 2024/2881
+-[6] PM2.5-GNN: A Domain Knowledge Enhanced Graph Neural Network For PM2.5 Forecasting, Wang S. et al.
+-[7] Graph WaveNet for Deep Spatial-Temporal Graph Modeling, Wu Z., et zl

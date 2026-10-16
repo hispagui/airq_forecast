@@ -22,8 +22,9 @@ Weather
 Models trained with weather need the weather of the 24 forecast hours:
   * forecast inside the data (a past date): the stored reanalysis weather is used;
   * forecast beyond the end of the data: the weather FORECAST is fetched from the
-    Open-Meteo Forecast API (internet needed), engineered and normalized exactly like the
-    training features.
+    Open-Meteo Forecast API (forecast_weather.py, internet needed) and turned into features
+    exactly like the ERA5 training features. The same request also fills the last days of
+    history that ERA5 does not cover yet (ERA5 is published ~5 days late).
 
 From Python
 -----------
@@ -42,7 +43,7 @@ import pandas as pd
 import torch
 
 from architectures import build_model
-from features.dataset import Normalizer, load_processed, window_inputs
+from features.dataset import Normalizer, feature_names, find_processed_dir, load_processed, window_inputs
 from features.metrics import output_size, point_forecast
 
 LOCAL_TZ = "Europe/Brussels"
@@ -93,10 +94,13 @@ class Forecaster:
         info = {"n_nodes": self.data.n_nodes, "n_features": cfg["n_features"],
                 "n_time_features": cfg["n_time_features"],
                 "n_future_features": cfg.get("n_future_features", cfg["n_time_features"]),
-                "history": self.L, "horizon": self.H}
+                "history": self.L, "horizon": self.H,
+                "feature_names": feature_names(self.data, self.use_weather)[0],
+                "processed": str(find_processed_dir(cfg["processed"]))}
         self.model = build_model(cfg["model"], info, out_size=output_size(cfg["loss"]),
                                  hidden=cfg["hidden"], layers=cfg["layers"],
-                                 dropout=cfg["dropout"], residual=not cfg["no_residual"])
+                                 dropout=cfg["dropout"], residual=not cfg["no_residual"],
+                                 **cfg.get("model_args", {}))
         self.model.load_state_dict(ckpt["model"])
         self.model.eval()
         unit = "ns" if self.data.timestamps.max() > 1e17 else "us"
@@ -120,21 +124,17 @@ class Forecaster:
                              "the model needs the 72 h before the forecast. Update the data first.")
         return t0
 
-    def forecast_weather(self, future_times: pd.DatetimeIndex) -> torch.Tensor:
-        """Weather forecast for the given hours at every station, normalized: (H, N, F_w)."""
-        from data.get_data.download_weather import fetch_forecast
-        from data.get_data.prepare_weather import RAW_FOR_FEATURE, engineer_features, normalize
+    def fetch_weather(self, hours: pd.DatetimeIndex) -> torch.Tensor:
+        """Weather from the forecast API for the given hours at every station,
+        turned into normalized features: (len(hours), N, F_w)."""
+        from forecast_weather import fetch_forecast
+        from data.get_data.prepare_weather import engineer_features, normalize
         wm = self.data.weather_meta
         coords = pd.DataFrame(wm["station_coords"])
-        needed = sorted({r for f in wm["features"] for r in RAW_FOR_FEATURE[f]})
-        print(f"Fetching the weather forecast for {len(coords)} stations (Open-Meteo)...")
-        df = fetch_forecast(coords["lat"], coords["lon"], future_times, needed)
-        raw = {v: df.pivot(index="time", columns="point", values=v)
-                    .reindex(index=future_times, columns=range(len(coords))).to_numpy()
-               for v in needed}
-        names, feats, _ = engineer_features(raw, only=wm["features"])
-        miss = np.isnan(feats).mean(axis=(0, 1))
-        for n, m in zip(names, miss):
+        print(f"Fetching weather from the Open-Meteo forecast API for {len(coords)} stations...")
+        common = fetch_forecast(coords["lat"], coords["lon"], hours)
+        names, feats, _ = engineer_features(common, only=wm["features"])
+        for n, m in zip(names, np.isnan(feats).mean(axis=(0, 1))):
             if m > 0:
                 print(f"  ! {n}: {m:.0%} missing in the forecast, replaced by the training average")
         return torch.from_numpy(normalize(feats, names, wm["normalization"]))
@@ -150,10 +150,21 @@ class Forecaster:
             x, x_future = window_inputs(d, [t0], self.L, self.H, self.use_weather)
         else:                                   # beyond the data: calendar + weather forecast
             ft = torch.from_numpy(time_features(future_times)).unsqueeze(0)
-            fw = (self.forecast_weather(future_times).unsqueeze(0)
-                  if self.use_weather else None)
+            fw = None
+            if self.use_weather:
+                # One request covers the forecast hours AND the recent history hours that
+                # ERA5 does not cover yet (marked invalid by prepare_weather.py)
+                hist_idx = np.arange(t0 - self.L, t0)
+                gaps = ~d.weather_valid[hist_idx].all(axis=1)          # (L,) hours to fill
+                hist_times = self.times[hist_idx[gaps]]
+                w = self.fetch_weather(hist_times.append(future_times))
+                fw = w[len(hist_times):].unsqueeze(0)
             x, x_future = window_inputs(d, [t0], self.L, self.H, self.use_weather,
                                         future_time=ft, future_weather=fw)
+            if self.use_weather and gaps.any():
+                nw = len(d.weather_features)
+                x[0, torch.from_numpy(np.flatnonzero(gaps)), :, 2:2 + nw] = w[:len(hist_times)]
+                print(f"  filled {int(gaps.sum())} recent history hours with forecast-API weather")
 
         pred = self.model(x, x_future)
         ugm3 = self.norm.denormalize(point_forecast(pred, self.cfg["loss"]))[0].numpy()  # (H, N)

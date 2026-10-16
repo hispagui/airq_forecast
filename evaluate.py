@@ -70,12 +70,6 @@ ALERT_METRICS = ["exceed_precision", "exceed_recall", "exceed_f1", "exceed_csi"]
 # @register_metric("max_error")
 # def max_error(pred, true, ctx):
 #     return float(np.nanmax(np.abs(pred - true)))
-#
-# Ideas for later:
-#   * probabilistic scores (CRPS, interval coverage) for quantile models: they need the
-#     full quantile output, so store it in train.py's test_predictions.npz first.
-#   * skill against climatology instead of last value: set ctx["baseline"] accordingly.
-#   * peak timing error: hours between predicted and observed daily maximum.
 
 
 # =========================================================================== #
