@@ -48,6 +48,27 @@ from .tcn import TemporalBlock, levels_needed
 
 WIND_HISTORY_HOURS = 6     # wind of the last 6 h describes the current transport
 
+def infer_feature_names(processed: str | None, n_features: int) -> list[str]:
+    """Input feature names rebuilt from data/processed, when the caller did not pass them.
+    x features are always [pm25, observed, *weather, *calendar] (see dataset.window_inputs)."""
+    import json
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+        from features.dataset import find_processed_dir
+    except ImportError:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+        from features.dataset import find_processed_dir
+    d = find_processed_dir(processed or "data/processed")
+    wm = d / "weather_meta.json"
+    weather = json.loads(wm.read_text())["features"] if wm.exists() else []
+    with np.load(d / "dataset.npz") as z:
+        n_cal = z["time_features"].shape[1]
+    calendar = [f"calendar_{i}" for i in range(n_cal)]
+    if n_features == 2 + len(weather) + n_cal:
+        return ["pm25", "observed"] + weather + calendar
+    if n_features == 2 + n_cal:                      # trained with --no-weather
+        return ["pm25", "observed"] + calendar
+    raise ValueError(f"Cannot match {n_features} input features to the data in {d}.")
 
 class GraphLayer(nn.Module):
     """One round of message passing on a dense graph (55 stations: a 55x55 matrix product)."""
@@ -120,7 +141,7 @@ class GNNForecaster(nn.Module):
         self.register_buffer("pos_km", torch.tensor(pos, dtype=torch.float32))
 
         if graph == "wind":
-            names = feature_names or []
+            names = feature_names or infer_feature_names(processed, n_features)
             if "wind_u" not in names or "wind_v" not in names:
                 raise ValueError("graph=wind needs wind_u and wind_v in the inputs "
                                  "(train with weather, without --no-weather).")

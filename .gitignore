@@ -15,6 +15,9 @@ wandb/
 
 # Runs, trained data and weights?
 train.log
+runs/*
+runs/comparison_20261018_110310
+runs/comparison_20261018_110414
 runs/comparison_20261015_173949
 runs/comparison_20261015_182535
 runs/lstm_mse_20261008_231542
@@ -26,6 +29,11 @@ runs/gru_20261014_2220
 runs/transformer_20261014_2220
 runs/transformer_mse_20261015_175751
 runs/tcn_20261014_2220
+runs/gnn_distance_20261017_1807
+runs/gnn_knn_20261017_1807
+runs/gnn_none_20261017_1807
+runs/gnn_random_20261017_1807
+runs/gnn_wind_20261017_1807
 
 logs/
 

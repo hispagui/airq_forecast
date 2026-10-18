@@ -43,6 +43,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from features.dataset import find_processed_dir
+
 EARTH_RADIUS_KM = 6371.0
 STATIC_GRAPHS = ("distance", "knn", "random", "none")
 ALL_GRAPHS = STATIC_GRAPHS + ("wind",)
@@ -53,7 +55,7 @@ ALL_GRAPHS = STATIC_GRAPHS + ("wind",)
 # --------------------------------------------------------------------------- #
 def load_coordinates(processed: str | Path = "data/processed") -> pd.DataFrame:
     """Station coordinates in the SAME order as the processed PM2.5 data."""
-    from dataset import find_processed_dir
+    #from dataset import find_processed_dir
     proc = find_processed_dir(processed)
     stations = json.loads((proc / "meta.json").read_text())["stations"]
     if (proc / "stations.csv").exists():
