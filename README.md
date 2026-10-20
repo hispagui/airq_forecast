@@ -14,11 +14,30 @@ We test/evaluate results against GDL and classical model results.
 
 
 
+**Contents:**
+- [Project Tree Structure](##Project Tree Structure)
+- [Phase 1](##Phase-1)
+    - [Get the Data](###Get the Data)
+    - [Training](###Training)
+    - [Evaluations](###Evaluations)
+    - [Experiment](###Experiment) 
+- [Phase 2](##Phase-2)
+    - [Models and Architectures](###Models and Architectures)
+        - [Experiment](####Experiment)
+    - [Spatial Holdout](###Spatial Holdout)
+        - [Experiment](####Experiment)
+- [Phase 3](##Phase-3)
+
+
+
+
 ## Project Tree Structure
 ```
 ├── evaluate.py
 ├── predict.py
+├── forecast_weather.py
 ├── train.py
+├── holdout.py
 ├── README.md
 ├── LICENSE
 └── architecture
@@ -29,9 +48,12 @@ We test/evaluate results against GDL and classical model results.
     ├── gru.py
     ├── tcn.py
     ├── transformer.py
+    ├── gnn.py
+    ├── gwnet.py
 └── features
     ├── dataset.py
     ├── metrics.py
+    ├── graph.py
 └── data
     └── processed
     └── raw
@@ -50,25 +72,26 @@ We test/evaluate results against GDL and classical model results.
 └── logs
 ```
 
+<br>
 
 ## Phase 1
 ### Get the Data
-To get the data from EEA and ERA5 respectively run:
+To get the data from EEA and ERA5 (via CDS) respectively run:
 - `download_eea.py` 
 - `download_weather.py`
-Sends everything to `data.raw`
+Sends everything to `data.raw`.<br>
 
 Then process the downloaded data by running:
 - `preprocess.py` (for the EEA data)
 - `prepare.py` (for weather statistics)
-Sends everything to `data.processed`
+Sends everything to `data.processed`.<br>
 
 (weather data might take some time to download, the API for ERA5 (copernicus) is quite frustrating, and also you need to setup an account and get a specific personal token.)
 
 ### Training
 This project has several model architectures, they all share the same frame, taking as input for each forecast; 72 hours \times 55 stations \times 17 numbers per hour and station (PM2.5, an “observed” flag, 8 weather variables, 7 calendar variables). <br>
 They output 24 hours \times 55 stations of PM2.5, and they all have a a summary vector of 64 numbers per station that goes into the same `ForecastHead`. <br>
-They are all trained via the same call `train.py`, but differ in one thing only; how they turn 72 hours of history into that 64-number summary. 
+They are all trained using the same call `train.py`, but differ in one thing only; how they turn 72 hours of history into that 64-number summary. 
 They are stored in `architectures`, and are:
 
 - `lstm.py` (default), <i>Long Short-Term Memory</i>: reads each station’s 72 hours (previous to wanted prediction) one by one, keeping a memory vector that summarizes level, trend and daily pattern. (~143000 total param.)
@@ -82,7 +105,7 @@ They are stored in `architectures`, and are:
 Run `evaluate.py runs/modelname_date_time --plots` (which calls `predict.py`, `metrics.py` and `dataset.py`).
 It computes statistical analysis of the models you chose to evaluate and save it to `runs.comparison_date_time20`. 
 Mainly, it computes the 
-- <b>RMSE</b> (root mean square deviation), this will be the main measurement as it punishes big misses more. 
+- <b>RMSE</b> (root mean square deviation), this will be the main measurement as it punishes big misses more, which is what we want when handeling weather components. 
 ```math
 RMSE = \sqrt{\frac{1}{n}\sum_{i=1}^n (y_i - \widehat{y}_i)^2}
 ```
@@ -100,14 +123,13 @@ This is our minimum bar, if our models cannot beat the persitence model, then th
 \frac{1 - RMSE_{model}}{RMSE_{persistence}} 
 ``` 
 
-
 `evaluate.py` also produces <b>ALERTS</b> and they depend on certain thresholds.
 Basically the idea is to have something behaving like this:
 "If tomorrow's forecast says PM2.5 $\ge 15 \mu g / m^3$, we warn the public." 
 
 
-### Experiment:
-Having thrained the `LSTM`, `MLP`, `TCN`, `GRU` and `Transformr` models, here are our main evaluations:
+### Experiment
+Having trained the `LSTM`, `MLP`, `TCN`, `GRU` and `Transformr` models, here are our main evaluations:
 
 
 | Model         | RMSE      |  MAE      | BIAS       | Skil. vs Pers.  | 
@@ -120,38 +142,30 @@ Having thrained the `LSTM`, `MLP`, `TCN`, `GRU` and `Transformr` models, here ar
 
 From this first experiment we can conclude that the best performing model in almost all categories is the <b>GRU</b>(even if the 3 other models seem to be very close). <br>
 `evaluation.py` also outputs many interesting results, like metrics by hours, by seasons, by months, ... <br>
-
-----------
-
-
-
-
+One caveat here is that our training has a "randomness" element to it.
+In training, the starting weights of our models, the order of training and the dropout as well are chosen at "random".
+For that reason we have included a seed that is modifiable by `train.py --seed X...X`, the default seed is $9999$ and two runs using the same seeds will output similar results.<br>
+<br>
 
 
-
-
-
-Now, we can also run `prediction.py` returns a forecast_YYYYMMDD_HHMM.csv file
-
-Looks as the data 72h before and predicts data for the next day (24h following).
-
-Each columns corresponds to an air monitoring station, and for each row, it outputs the average for <i>micrograms of fine particules per cubic metre</i> predicted for that hour.
+One can also make a single `predict.py` call to make a single forecast.
+It is possible to specify the date and the model it should use (defaults are going to be next day available from recovered data and last trained model).
 
 
 
-
+<br>
 
 ## Phase 2
 
-So phase 2 consists of taking advantage of the fact that air concentration predictions are greatly impacted by geographical location; we can use the proximity of stations in the learning of our models to increase precision, introducing Graph Neural Networks.<br>
+Phase 2 consists in taking advantage of the fact that air concentration predictions are greatly impacted by geographical location; we can use the proximity of stations in the learning of our models to increase precision, introducing Graph Neural Networks.<br>
 
 In addition, the central idea that we borrowed from [6], is that "wind directions are critical for modeling PM2.5 transport". 
-We implement this by letting wind speed and direction decide which edges matter in our grap:
+We implement this by letting wind speed and direction decide which edges matter in our graph:
 
 
 
 
-### Models and Architectures:
+### Models and Architectures
 In phase 2, we have added two models (graph models), a <b>Graph Neural Network</b> (GNN) that takes advantage of working over multiple graphs and the <b>Graph WaveNet</b> (GWNet) inspired by [7].
 - `gnn.py` is an <i>encode</i> (with GRU) then <i>propagate</i> neural network, with wind-dependnt edges.
 The graph layers add about $17000$ parameters which amounts to $\sim 143000$ in total, about the size of the LSTM model, so comparison is fair!
@@ -180,9 +194,9 @@ Its key idea is that it alternates between time and space at every layer, and le
 
 
 <br>
-Training and evaluation work the same as in phase 1, the key measurments are the same as well, to ensure we can fairly compare our different models,
+Training and evaluation work the same as in phase 1, the key measurments are the same as well, to ensure we can fairly compare our different models.
 
-#### Experiment:
+#### Experiment
 
 We also evaluate our graph models against the best performing model from phase 1 (i.e. GRU), here is a table of our results:
 
@@ -200,7 +214,7 @@ GNN wind is the best trained model.
 
 
 
-### Spatial Holdout:
+### Spatial Holdout
 
 In this section, wea answer the quesiton: <b>can our model forecast PM2.5 at a station it never saw during training?</b> 
 It works as follow:
@@ -211,7 +225,7 @@ It works as follow:
 Training is again done by calling `train.py`.
 And one can compare (evaluate) different holdouts by calling `holdout.py compare MODELS`
 
-#### Expermient:
+#### Expermient
 We compared the holdout's RMSE for 3 trained models, GRU, GNN (random) and GNN (wind), below are our results:
 
 | Model         | RMSE   |  MAE  | h+1   | h+3   | h+6   | h+12  | h+24  |
@@ -241,6 +255,7 @@ So in conclusion we have that
 
 
 
+<br>
 
 ## Phase 3
 
@@ -250,11 +265,12 @@ Does it generalise better to unseen stations?
 
 ### How it Works
 
-As a circuit with about 6 inputs can’t process $72$ hours $\times 40$ stations $\times 12$ features, we keep our best trained models and swap only the last layers for a small quantum circuit.
+As a circuit with about 6 inputs can’t process $72$ hours $\times 55$ stations $\times 12$ features, we keep our best trained models and swap only the last layers for a small quantum circuit.
 
 
 
  
+quantum phases get their own learning rate (--lr-head 1e-2), higher than the linear layers (1e-3)
 
 
 
@@ -264,6 +280,14 @@ As a circuit with about 6 inputs can’t process $72$ hours $\times 40$ stations
 
 
 
+## Recommended Installations
+
+PyTorch, 
+Numpy
+torch-geometric  
+
+## AI 
+...
 
 
 ## Litterature
