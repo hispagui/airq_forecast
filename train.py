@@ -90,7 +90,9 @@ def train_one_epoch(model, loader, loss_fn, optimizer, device, max_batches=None,
         batch = to_device(batch, device)
         pred = model(batch["x"], batch["x_future"])
         loss = loss_fn(pred, batch["y"], batch["y_mask"])
-
+        if not torch.isfinite(loss):           # one bad batch must not corrupt the weights
+            print(f"  ! non-finite loss at batch {i}, skipped")
+            continue
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), clip)  # avoids rare exploding steps
@@ -260,6 +262,9 @@ def main():
             break
 
     # ---- final evaluation with the best checkpoint ------------------------
+    if not (run_dir / "best.pt").exists():
+        raise SystemExit("\nNo valid checkpoint: the validation loss was never a finite number "
+                         "(NaN). The model diverged. Try --device cpu, or a lower --lr.")
     ckpt = torch.load(run_dir / "best.pt", map_location=device, weights_only=False)
     model.load_state_dict(ckpt["model"])
     print(f"\nBest epoch: {best_epoch} (val loss {best_val:.4f})")

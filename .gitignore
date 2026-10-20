@@ -8,6 +8,7 @@ features/__pycache__
 *.grib
 
 # Model checkpoints and experiment logs
+check_model.py
 checkpoints/
 wandb/
 *.pt

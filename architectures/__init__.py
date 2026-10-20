@@ -35,9 +35,13 @@ def build_model(name: str, info: dict, out_size: int = 1, **kwargs) -> nn.Module
         # the name is kept so that the Phase-1 model files need no change.
         n_time_features=info.get("n_future_features", info["n_time_features"]),
         history=info["history"],
-        horizon=info["horizon"], out_size=out_size, **kwargs,
+        horizon=info["horizon"], out_size=out_size,
+        # extra context for models that need it (graph models: coordinates, wind features);
+        # the other models ignore these through their **_ argument
+        processed=info.get("processed"), feature_names=info.get("feature_names"),
+        **kwargs,
     )
 
 
 # Import model files so their @register_model decorators run
-from . import mlp, lstm, gru, tcn, transformer, gnn  # noqa: E402,F401
+from . import mlp, lstm, gru, tcn, transformer, gnn, gwnet  # noqa: E402,F401
