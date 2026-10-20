@@ -50,9 +50,23 @@ class ForecastHead(nn.Module):
             nn.Linear(hidden, horizon * out_size),
         )
 
+    def use_static_features(self, feats: torch.Tensor) -> None:
+        """Describe each station by its static features (coordinates, altitude, type...)
+        instead of a learned identity. feats: (N, S). Needed for the spatial holdout: a
+        station never seen in training has no trained embedding, but it has features."""
+        self.register_buffer("static_feats", feats.float())
+        self.static_proj = nn.Linear(feats.shape[1], self.station_emb.embedding_dim)
+        del self.station_emb
+
+    def station_vectors(self) -> torch.Tensor:
+        """(N, E): one "who am I" vector per station."""
+        if hasattr(self, "static_proj"):
+            return self.static_proj(self.static_feats)
+        return self.station_emb.weight
+
     def forward(self, enc: torch.Tensor, x: torch.Tensor, x_future: torch.Tensor) -> torch.Tensor:
         B, N, _ = enc.shape
-        emb = self.station_emb.weight.unsqueeze(0).expand(B, -1, -1)       # (B, N, E)
+        emb = self.station_vectors().unsqueeze(0).expand(B, -1, -1)        # (B, N, E)
         if x_future.dim() == 4:      # (B, H, N, F_fut): per-station future features
             fut = x_future.permute(0, 2, 1, 3).reshape(B, N, -1)            # (B, N, H*F_fut)
         else:                        # (B, H, F_time): same for every station (older code)

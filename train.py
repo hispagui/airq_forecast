@@ -161,7 +161,7 @@ def parse_args():
     p.add_argument("--threshold", type=float, default=25.0, help="alert threshold, ug/m3")
     p.add_argument("--device", default="auto", help="auto | cpu | cuda | mps")
     p.add_argument("--num-workers", type=int, default=0)
-    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--seed", type=int, default=9999)
     p.add_argument("--run-name", default=None)
     p.add_argument("--runs-dir", default="runs")
     return p.parse_args()
