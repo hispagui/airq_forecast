@@ -16,6 +16,7 @@ We test/evaluate results against GDL and classical model results.
 
 **Contents:**
 - [Project Tree Structure](##Project Tree Structure)
+- [Goal](##Goal)
 - [Phase 1](##Phase-1)
     - [Get the Data](###Get the Data)
     - [Training](###Training)
@@ -74,14 +75,27 @@ We test/evaluate results against GDL and classical model results.
 
 <br>
 
+## The goal of this project
+
+Air pollution (PM$2.5$, fine particles) is measured every hour at about $55$ stations in Belgium.
+**We want to predict the next $24$ hours of PM$2.5$ at every station**, using:
+
+- the last $72$ hours of PM$2.5$ at the stations,
+- the weather (wind, temperature, rain...),
+- the calendar (hour of the day, day of the week, season).
+
+A good forecast is useful for **pollution alerts**: warning people before a polluted day.
+
+<br>
+
 ## Phase 1
 ### Get the Data
 To get the data from EEA and ERA5 (via CDS) respectively run:
 - `download_eea.py` 
 - `download_weather.py`
-Sends everything to `data.raw`.<br>
+This downloads $10$ years of weather and PM$2.5$ data, which are all sentto `data.raw`.<br>
 
-Then process the downloaded data by running:
+We then process the downloaded data by running:
 - `preprocess.py` (for the EEA data)
 - `prepare.py` (for weather statistics)
 Sends everything to `data.processed`.<br>
@@ -89,16 +103,25 @@ Sends everything to `data.processed`.<br>
 (weather data might take some time to download, the API for ERA5 (copernicus) is quite frustrating, and also you need to setup an account and get a specific personal token.)
 
 ### Training
-This project has several model architectures, they all share the same frame, taking as input for each forecast; 72 hours \times 55 stations \times 17 numbers per hour and station (PM2.5, an “observed” flag, 8 weather variables, 7 calendar variables). <br>
-They output 24 hours \times 55 stations of PM2.5, and they all have a a summary vector of 64 numbers per station that goes into the same `ForecastHead`. <br>
-They are all trained using the same call `train.py`, but differ in one thing only; how they turn 72 hours of history into that 64-number summary. 
+This project allows for one to train multiple models through several model architectures, they all share the same frame, taking as input for each forecast; $72$ hours \times $55$ stations \times $17$ numbers per hour and station (PM$2.5$, an “observed” flag, $8$ weather variables, $7$ calendar variables). <br>
+They output $24$ hours \times $55$ stations of PM$2.5$, and they all have a a summary vector of $64$ numbers per station that goes into the same `ForecastHead`. <br>
+They are all trained using the same call `train.py`, but differ in one thing only; how they turn $72$ hours of history into that $64$-number summary. <br>
+
+The training is done by splitting the $10$ years of data as follow:
+| Years | Name | Used for |
+|-------|------|----------|
+| $2016–2023$ | train | the model learns from these |
+| $2024$ | validation | we pick the best version of the model |
+| $2025$ | test | final grade, looked at only once at the end |
+<br>
+
 They are stored in `architectures`, and are:
 
-- `lstm.py` (default), <i>Long Short-Term Memory</i>: reads each station’s 72 hours (previous to wanted prediction) one by one, keeping a memory vector that summarizes level, trend and daily pattern. (~143000 total param.)
-- `mlp.py`, <i>Multi-Layer Perceptron</i>: flattens the 72 hours into one vector without any notion of order. It’s a lower bound that shows what the LSTM’s sequential reading adds (~116000 total param.).
-- `gru.py`, <i>Gated Recurrent Unit</i>: this is basically a lighter version of the LSTM (~126000 total param.)
-- `tcn.py`, <I>Temporal Convolutional Network</i>: here the idea is that instead of reading hour by hour, the TCN slides a small <i>filter</i> along the 72 hours. And a filter is a weighted combination of a few hours (~200000 param.).
-- `transformer.py` cuts the 72 hours into 24 <b>chunks</b> of 3 hours that we call tokens and training decides how much each token matters (~147000 total param.).
+- `lstm.py` (default), <i>Long Short-Term Memory</i>: reads each station’s $72$ hours (previous to wanted prediction) one by one, keeping a memory vector that summarizes level, trend and daily pattern. ($\sim 143000$ total param.)
+- `mlp.py`, <i>Multi-Layer Perceptron</i>: flattens the $72$ hours into one vector without any notion of order. It’s a lower bound that shows what the LSTM’s sequential reading adds ($\sim 116000$ total param.).
+- `gru.py`, <i>Gated Recurrent Unit</i>: this is basically a lighter version of the LSTM ($\sim 126000$ total param.)
+- `tcn.py`, <I>Temporal Convolutional Network</i>: here the idea is that instead of reading hour by hour, the TCN slides a small <i>filter</i> along the $72$ hours. And a filter is a weighted combination of a few hours ($\sim 200000$ param.).
+- `transformer.py` cuts the $72$ hours into $24$ <b>chunks</b> of $3$ hours that we call tokens and training decides how much each token matters ($\sim 147000$ total param.).
 
 
 ### Evaluations
@@ -206,10 +229,11 @@ We also evaluate our graph models against the best performing model from phase 1
 | GNN knn       | 5.04      | 3.05      | +0.37      | 0.27           | 
 | GNN none      | 5.04      | 3.07      | +0.33      | 0.28           |
 | GNN rand.     | 4.95      | 3.01      | +0.39      | 0.29           | 
-| GNN wind      |<b>4.94</b>|<b>3.00</b>| +0.39      |<b>0.29</b>     |
+| GNN wind      | 4.94      |<b>3.00</b>| +0.39      |<b>0.29</b>     |
+| GWNet         |<b>4.93</b>|<b>3.00</b>| +0.42      |<b>0.29</b>     |
 | GRU           | 5.05      | 3.05      |<b>+0.09</b>| 0.27           |
 
-GNN wind is the best trained model.
+GNN wind and GWNet are very close and they are our best trained model.
 
 
 
@@ -234,7 +258,7 @@ We compared the holdout's RMSE for 3 trained models, GRU, GNN (random) and GNN (
 | GNN (random)  | 5.25   | 3.30  | 4.40  | 4.53  | 4.83  | 5.35  | 5.80  |
 | GNN (wind)    | 5.20   | 3.26  | 3.80  | 4.12  | 4.74  | 5.31  | 5.87  |
 
-What is interesting here is that `GNN wind`clearly beats `GNN random` in the first hours.
+What is interesting here is that `GNN wind` clearly beats `GNN random` in the first hours.
 We can undestand this as; when a station has no measurments, knowing which neighbours are upwind matters a lot for the next hours. <br>
 And by $h+24$, `GNN random` becomes slighlty better, this could be explain by one day ahead only the reginonal level matters.
 So in conclusion we have that 
