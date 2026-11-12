@@ -5,7 +5,7 @@ To that end, we train learnning/analytical models using data from the European E
 
 This project has 3 phases, 
 - <i>Phase 1</i> consists in building the ground setup.
-Mainly, it consists of data processing, basic training models and evaluations for weather forecasting, nothing too existing, but we reuse the structure for implementing the following models.
+Mainly, it consists of data processing, basic training models and evaluations for weather forecasting, nothing too crazy, but we reuse the structure for implementing the next models.
 
 - <i>Phase 2</i> focuses on implementing Geometric Deep Learning, in particualr using graph neural networks (GNN) and Graph WaveNet (GWNet). 
 We can play with the settings, and our graph responds to multiple architectures (i.e. knn, wind, random, ...).
