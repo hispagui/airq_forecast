@@ -4,19 +4,18 @@ The goal of this project is to predict and analyse the concentration of PM2.5 pa
 To that end, we train learnning/analytical models using data from the European Environment Agency (EEA) and the Copernicus Climate Data Store (CDS).
 
 This project has 3 phases, 
-- <i>Phase 1</i> consists in building the ground setup: it has data processing, mostly basic training models and evaluations for weather forecasting.
+- <i>Phase 1</i> consists in building the ground setup.
+Mainly, it consists of data processing, basic training models and evaluations for weather forecasting, nothing too existing, but we reuse the structure for implementing the following models.
 
-- <i>Phase 2</i> focuses on implementing Geometric Deep Learning, in particualr using graph nets 
+- <i>Phase 2</i> focuses on implementing Geometric Deep Learning, in particualr using graph neural networks (GNN) and Graph WaveNet (GWNet). 
+We can play with the settings, and our graph responds to multiple architectures (i.e. knn, wind, random, ...).
+Then evaluate against previous "more common" models.
 
-
-in order to enhance the , and in 
 
 - <i>Phase 3</i>, we implement quantum layers (maybe overkill), to further improve our models (ex. using Perceval).
 We test/evaluate results against GDL and classical model results.
 
-
-
-**Contents:**
+<!-- 
 - [Project Tree Structure](##Project Tree Structure)
 - [Goal](##Goal)
 - [Phase 1](##Phase-1)
@@ -30,6 +29,7 @@ We test/evaluate results against GDL and classical model results.
     - [Spatial Holdout](###Spatial Holdout)
         - [Experiment](####Experiment)
 - [Phase 3](##Phase-3)
+-->
 
 
 
@@ -105,25 +105,25 @@ Sends everything to `data.processed`.<br>
 (weather data might take some time to download, the API for ERA5 (copernicus) is quite frustrating, and also you need to setup an account and get a specific personal token.)
 
 ### Training
-This project allows for one to train multiple models through several model architectures, they all share the same frame, taking as input for each forecast; 72 hours \(\times\) 55 stations \(\times\) 17 numbers per hour and station (PM2.5, an “observed” flag, 8 weather variables, 7 calendar variables). <br>
-They output 24 hours \(\times\) 55 stations of PM2.5, and they all have a a summary vector of 64 numbers per station that goes into the same `ForecastHead`. <br>
+This project allows for one to train multiple models through several model architectures, they all share the same frame, taking as input for each forecast; 72 hours $\times$ 55 stations $\times$ 17 numbers per hour and station (PM2.5, an “observed” flag, 8 weather variables, 7 calendar variables). <br>
+They output 24 hours $\times$ 55 stations of PM2.5, and they all have a a summary vector of 64 numbers per station that goes into the same `ForecastHead`. <br>
 They are all trained using the same call `train.py`, but differ in one thing only; how they turn 72 hours of history into that 64-number summary. <br>
 
 The training is done by splitting the 10 years of data as follow:
 | Years | Name | Used for |
 |-------|------|----------|
-| \(2016–2023\) | train | the model learns from these |
-| \(2024\) | validation | we pick the best version of the model |
-| \(2025\) | test | final grade, looked at only once at the end |
+| 2016–2023 | train | the model learns from these |
+| 2024 | validation | we pick the best version of the model |
+| 2025 | test | final grade, looked at only once at the end |
 <br>
 
 They are stored in `architectures`, and are:
 
-- `lstm.py` (default), <i>Long Short-Term Memory</i>: reads each station’s 72 hours (previous to wanted prediction) one by one, keeping a memory vector that summarizes level, trend and daily pattern. (\(\sim 143000\) total param.)
-- `mlp.py`, <i>Multi-Layer Perceptron</i>: flattens the 72 hours into one vector without any notion of order. It’s a lower bound that shows what the LSTM’s sequential reading adds (\(\sim 116000\) total param.).
-- `gru.py`, <i>Gated Recurrent Unit</i>: this is basically a lighter version of the LSTM (\(\sim 126000\) total param.)
-- `tcn.py`, <I>Temporal Convolutional Network</i>: here the idea is that instead of reading hour by hour, the TCN slides a small <i>filter</i> along the 72 hours. And a filter is a weighted combination of a few hours (\(\sim 200000\) param.).
-- `transformer.py` cuts the 72 hours into 24 <b>chunks</b> of 3 hours that we call tokens and training decides how much each token matters (\(\sim 147000\) total param.).
+- `lstm.py` (default), <i>Long Short-Term Memory</i>: reads each station’s 72 hours (previous to wanted prediction) one by one, keeping a memory vector that summarizes level, trend and daily pattern. (\sim 143000 total param.)
+- `mlp.py`, <i>Multi-Layer Perceptron</i>: flattens the 72 hours into one vector without any notion of order. It’s a lower bound that shows what the LSTM’s sequential reading adds (\sim 116000 total param.).
+- `gru.py`, <i>Gated Recurrent Unit</i>: this is basically a lighter version of the LSTM (\sim 126000 total param.)
+- `tcn.py`, <I>Temporal Convolutional Network</i>: here the idea is that instead of reading hour by hour, the TCN slides a small <i>filter</i> along the 72 hours. And a filter is a weighted combination of a few hours (\sim 200000 param.).
+- `transformer.py` cuts the 72 hours into 24 <b>chunks</b> of 3 hours that we call tokens and training decides how much each token matters (\sim 147000 total param.).
 
 
 ### Evaluations
@@ -193,25 +193,28 @@ We implement this by letting wind speed and direction decide which edges matter 
 ### Models and Architectures
 In phase 2, we have added two models (graph models), a <b>Graph Neural Network</b> (GNN) that takes advantage of working over multiple graphs and the <b>Graph WaveNet</b> (GWNet) inspired by [7].
 - `gnn.py` is an <i>encode</i> (with GRU) then <i>propagate</i> neural network, with wind-dependnt edges.
-The graph layers add about 17000 parameters which amounts to \(\sim 143000\) in total, about the size of the LSTM model, so comparison is fair!
-    - `knn.py`, the $k$ neareast neighbours (here by default $k=8$).
+The graph layers add about 17000 parameters which amounts to \sim 143000 in total, about the size of the LSTM model, so comparison is fair! (inside `graph.py`, you find:)
+    - `knn`, the $k$ neareast neighbours (here by default $k=8$).
     Weights are computed via $A[i,j]=1$ if $j$ is among the 8 neighbours of $i$, then we normalize this.
-    - `distance.py`, where closer counts more (this graph is used in Graph WaveNet [7]). Weights are computed via 
+    - `distance`, where closer counts more (this graph is used in Graph WaveNet [7]). Weights are computed via 
+
     ```math
-    A[i,j]=\exp(-d_{ij}^2/\sigma^2)
+    A[i,j] = \exp \left( -\frac{ d_{ij}^2 }{ \sigma^2 } \right) 
     ``` 
+
     with $d_{ij}$ being the distance between station $i$ and $j$ and $\sigma$ the spread of all station distances.
-    - `wind.py`, basically listens to whoever is upwind
+    - `wind`, basically listens to whoever is upwind
     ... say more
     ```math
-    A[i,j] = \exp(s_{ij}) / \Sigma_j' \exp(s_{ij}')
+    A[i,j] = \frac{ \exp ( s_{ij} )}{ \sum_{j'\in \mathcal{N}(i)} \exp (s_{ij'}) }   
     ```
+    With $\mathcal{N}(i)$ the neighbours of the candidate $i$ and $s_{ij} = MLP(f_{ij})$ where $f_{ij}$ are the wind and geometry features on the edge $j \rightarrow i$.
     It has two interesting properties, it is a <i>directed graph</i> $A[i,j]\neq A[j,i]$ and it is <i>rotation invariant </i>
     
-    - `random.py`, uses the same edges as `distance.py` but shuffles the stations: $A \leftarrow P AP^r$ for a permutation $P$.
+    - `random`, uses the same edges as `distance.py` but shuffles the stations: $A \leftarrow P AP^r$ for a permutation $P$.
     For example, Antwerps' station might now listen to stations near Liège.
 
-    - `none.py`, there is no neighbours here, $A[i,j]=0$. 
+    - `none`, there is no neighbours here, $A[i,j]=0$. 
     We included this graph this distinguish between : <i>the graph helped</i> and <i>the extra layers helped</i>.
 
 - `gwnet.py` is also a Graph Neural Network, but unlike our first GNN, it is a reference model for forecasting on network sensors. 
@@ -308,11 +311,11 @@ quantum phases get their own learning rate (--lr-head 1e-2), higher than the lin
 
 ## Recommended Installations
 
-PyTorch, 
-Numpy
-torch-geometric  
+PyTorch, <br>
+Numpy, <br>
+torch-geometric <br>
 
-## AI 
+## About AI for this project 
 ...
 
 
