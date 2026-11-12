@@ -4,10 +4,12 @@ The goal of this project is to predict and analyse the concentration of PM2.5 pa
 To that end, we train learnning/analytical models using data from the European Environment Agency (EEA) and the Copernicus Climate Data Store (CDS).
 
 This project has 3 phases, 
-- <i>Phase 1</i> consists in building the ground setup: 
-    ....
+- <i>Phase 1</i> consists in building the ground setup: it has data processing, mostly basic training models and evaluations for weather forecasting.
 
-- <i>Phase 2</i> focuses on using Geometric Deep Learning in order to enhance the , and in 
+- <i>Phase 2</i> focuses on implementing Geometric Deep Learning, in particualr using graph nets 
+
+
+in order to enhance the , and in 
 
 - <i>Phase 3</i>, we implement quantum layers (maybe overkill), to further improve our models (ex. using Perceval).
 We test/evaluate results against GDL and classical model results.
@@ -77,10 +79,10 @@ We test/evaluate results against GDL and classical model results.
 
 ## The goal of this project
 
-Air pollution (PM$2.5$, fine particles) is measured every hour at about $55$ stations in Belgium.
-**We want to predict the next $24$ hours of PM$2.5$ at every station**, using:
+Air pollution (PM2.5, fine particles) is measured every hour at about 55 stations in Belgium.
+**We want to predict the next 24 hours of PM2.5 at every station**, using:
 
-- the last $72$ hours of PM$2.5$ at the stations,
+- the last 72 hours of PM2.5 at the stations,
 - the weather (wind, temperature, rain...),
 - the calendar (hour of the day, day of the week, season).
 
@@ -93,7 +95,7 @@ A good forecast is useful for **pollution alerts**: warning people before a poll
 To get the data from EEA and ERA5 (via CDS) respectively run:
 - `download_eea.py` 
 - `download_weather.py`
-This downloads $10$ years of weather and PM$2.5$ data, which are all sentto `data.raw`.<br>
+This downloads 10 years of weather and PM2.5 data, which are all sentto `data.raw`.<br>
 
 We then process the downloaded data by running:
 - `preprocess.py` (for the EEA data)
@@ -103,25 +105,25 @@ Sends everything to `data.processed`.<br>
 (weather data might take some time to download, the API for ERA5 (copernicus) is quite frustrating, and also you need to setup an account and get a specific personal token.)
 
 ### Training
-This project allows for one to train multiple models through several model architectures, they all share the same frame, taking as input for each forecast; $72$ hours \times $55$ stations \times $17$ numbers per hour and station (PM$2.5$, an “observed” flag, $8$ weather variables, $7$ calendar variables). <br>
-They output $24$ hours \times $55$ stations of PM$2.5$, and they all have a a summary vector of $64$ numbers per station that goes into the same `ForecastHead`. <br>
-They are all trained using the same call `train.py`, but differ in one thing only; how they turn $72$ hours of history into that $64$-number summary. <br>
+This project allows for one to train multiple models through several model architectures, they all share the same frame, taking as input for each forecast; 72 hours \(\times\) 55 stations \(\times\) 17 numbers per hour and station (PM2.5, an “observed” flag, 8 weather variables, 7 calendar variables). <br>
+They output 24 hours \(\times\) 55 stations of PM2.5, and they all have a a summary vector of 64 numbers per station that goes into the same `ForecastHead`. <br>
+They are all trained using the same call `train.py`, but differ in one thing only; how they turn 72 hours of history into that 64-number summary. <br>
 
-The training is done by splitting the $10$ years of data as follow:
+The training is done by splitting the 10 years of data as follow:
 | Years | Name | Used for |
 |-------|------|----------|
-| $2016–2023$ | train | the model learns from these |
-| $2024$ | validation | we pick the best version of the model |
-| $2025$ | test | final grade, looked at only once at the end |
+| \(2016–2023\) | train | the model learns from these |
+| \(2024\) | validation | we pick the best version of the model |
+| \(2025\) | test | final grade, looked at only once at the end |
 <br>
 
 They are stored in `architectures`, and are:
 
-- `lstm.py` (default), <i>Long Short-Term Memory</i>: reads each station’s $72$ hours (previous to wanted prediction) one by one, keeping a memory vector that summarizes level, trend and daily pattern. ($\sim 143000$ total param.)
-- `mlp.py`, <i>Multi-Layer Perceptron</i>: flattens the $72$ hours into one vector without any notion of order. It’s a lower bound that shows what the LSTM’s sequential reading adds ($\sim 116000$ total param.).
-- `gru.py`, <i>Gated Recurrent Unit</i>: this is basically a lighter version of the LSTM ($\sim 126000$ total param.)
-- `tcn.py`, <I>Temporal Convolutional Network</i>: here the idea is that instead of reading hour by hour, the TCN slides a small <i>filter</i> along the $72$ hours. And a filter is a weighted combination of a few hours ($\sim 200000$ param.).
-- `transformer.py` cuts the $72$ hours into $24$ <b>chunks</b> of $3$ hours that we call tokens and training decides how much each token matters ($\sim 147000$ total param.).
+- `lstm.py` (default), <i>Long Short-Term Memory</i>: reads each station’s 72 hours (previous to wanted prediction) one by one, keeping a memory vector that summarizes level, trend and daily pattern. (\(\sim 143000\) total param.)
+- `mlp.py`, <i>Multi-Layer Perceptron</i>: flattens the 72 hours into one vector without any notion of order. It’s a lower bound that shows what the LSTM’s sequential reading adds (\(\sim 116000\) total param.).
+- `gru.py`, <i>Gated Recurrent Unit</i>: this is basically a lighter version of the LSTM (\(\sim 126000\) total param.)
+- `tcn.py`, <I>Temporal Convolutional Network</i>: here the idea is that instead of reading hour by hour, the TCN slides a small <i>filter</i> along the 72 hours. And a filter is a weighted combination of a few hours (\(\sim 200000\) param.).
+- `transformer.py` cuts the 72 hours into 24 <b>chunks</b> of 3 hours that we call tokens and training decides how much each token matters (\(\sim 147000\) total param.).
 
 
 ### Evaluations
@@ -167,7 +169,7 @@ From this first experiment we can conclude that the best performing model in alm
 `evaluation.py` also outputs many interesting results, like metrics by hours, by seasons, by months, ... <br>
 One caveat here is that our training has a "randomness" element to it.
 In training, the starting weights of our models, the order of training and the dropout as well are chosen at "random".
-For that reason we have included a seed that is modifiable by `train.py --seed X...X`, the default seed is $9999$ and two runs using the same seeds will output similar results.<br>
+For that reason we have included a seed that is modifiable by `train.py --seed X...X`, the default seed is 9999 and two runs using the same seeds will output similar results.<br>
 <br>
 
 
@@ -191,7 +193,7 @@ We implement this by letting wind speed and direction decide which edges matter 
 ### Models and Architectures
 In phase 2, we have added two models (graph models), a <b>Graph Neural Network</b> (GNN) that takes advantage of working over multiple graphs and the <b>Graph WaveNet</b> (GWNet) inspired by [7].
 - `gnn.py` is an <i>encode</i> (with GRU) then <i>propagate</i> neural network, with wind-dependnt edges.
-The graph layers add about $17000$ parameters which amounts to $\sim 143000$ in total, about the size of the LSTM model, so comparison is fair!
+The graph layers add about 17000 parameters which amounts to \(\sim 143000\) in total, about the size of the LSTM model, so comparison is fair!
     - `knn.py`, the $k$ neareast neighbours (here by default $k=8$).
     Weights are computed via $A[i,j]=1$ if $j$ is among the 8 neighbours of $i$, then we normalize this.
     - `distance.py`, where closer counts more (this graph is used in Graph WaveNet [7]). Weights are computed via 
